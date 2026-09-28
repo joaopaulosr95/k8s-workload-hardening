@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: Namespace
+metadata: { name: harden-a }
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: harden-b }
+---
+# harden-b's LimitRange sets only `default`, with no `defaultRequest`.
+# Kubernetes uses default for defaultRequest when the latter is omitted, so
+# every container here already has an effective request and this tool must
+# report its gaps as covered rather than filling them (BR-06, AC-06, AC-15).
+apiVersion: v1
+kind: LimitRange
+metadata: { name: default-only, namespace: harden-b }
+spec:
+  limits:
+    - type: Container
+      default: { cpu: 200m, memory: 128Mi }
+---
+# fill-me: no requests, and a container that explicitly runs as root. Root is
+# evidenced, so pod-level runAsNonRoot must NOT be written — and the pod must
+# stay Ready, which is the whole point (BR-02, AC-05, AC-15).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: fill-me, namespace: harden-a }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: fill-me } }
+  template:
+    metadata: { labels: { app: fill-me } }
+    spec:
+      containers:
+        - name: probe
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            [
+              "mkdir -p /srv && hostname > /srv/index.html && httpd -f -p 8080 -h /srv",
+            ]
+          ports: [{ containerPort: 8080 }]
+          securityContext: { runAsUser: 0 }
+---
+# nonroot: no requests, and a container that runs as a non-root UID. Nothing
+# evidences root, so pod-level runAsNonRoot IS written, and the pod must still
+# become Ready.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: nonroot, namespace: harden-a }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: nonroot } }
+  template:
+    metadata: { labels: { app: nonroot } }
+    spec:
+      containers:
+        - name: probe
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            [
+              "mkdir -p /tmp/srv && hostname > /tmp/srv/index.html && httpd -f -p 8080 -h /tmp/srv",
+            ]
+          ports: [{ containerPort: 8080 }]
+          securityContext: { runAsUser: 65532, runAsGroup: 65532 }
+---
+# already-hardened: every policy field already present, plus BOTH cpu and
+# memory limits and no requests. Its effective requests equal its limits, so it
+# has no gap of any kind: no patch, no API call, and QoS stays Guaranteed
+# (BR-01, AC-03, AC-15).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: already-hardened, namespace: harden-a }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: already-hardened } }
+  template:
+    metadata: { labels: { app: already-hardened } }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: probe
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            [
+              "mkdir -p /tmp/srv && hostname > /tmp/srv/index.html && httpd -f -p 8080 -h /tmp/srv",
+            ]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            limits: { cpu: 500m, memory: 1Gi }
+---
+# skip-me: the escape hatch. Untouched however many gaps it has (BR-04, AC-12).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skip-me
+  namespace: harden-a
+  annotations: { hardening.acme.corp/skip: "true" }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: skip-me } }
+  template:
+    metadata: { labels: { app: skip-me } }
+    spec:
+      containers:
+        - name: probe
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            [
+              "mkdir -p /srv && hostname > /srv/index.html && httpd -f -p 8080 -h /srv",
+            ]
+---
+# covered: no requests, in the namespace whose LimitRange supplies them. Its
+# securityContext gaps are filled; its resource gaps are reported as covered
+# and no request is written (BR-06, AC-06, AC-15).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: covered, namespace: harden-b }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: covered } }
+  template:
+    metadata: { labels: { app: covered } }
+    spec:
+      containers:
+        - name: probe
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            [
+              "mkdir -p /tmp/srv && hostname > /tmp/srv/index.html && httpd -f -p 8080 -h /tmp/srv",
+            ]
+          securityContext: { runAsUser: 65532 }

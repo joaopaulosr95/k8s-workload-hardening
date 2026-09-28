@@ -1,0 +1,15 @@
+apiVersion: hardening.acme.corp/v1alpha1
+kind: WorkloadHardening
+metadata:
+  name: tenant-hardening
+  namespace: isolation-system
+spec:
+  namespaces: [harden-a, harden-b]
+  resources:
+    # Required. Limits are never written (BR-03, D-07).
+    requests: { cpu: 10m, memory: 32Mi }
+  securityContext:
+    # Opt-in, and off by default (BR-02, D-06).
+    readOnlyRootFilesystem: false
+  # Empty means preview only. Copy hashes out of status.plan[].hash to approve.
+  approvedPlan: []

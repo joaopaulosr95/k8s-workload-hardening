@@ -1,8 +1,12 @@
 # k8s-workload-hardening
 
-An internal SRE tool for a Kubernetes cluster. **Core task 1 — on-demand network
-isolation between two workloads — is implemented here.** Core task 2 (workload
-hardening) is specified in `specs/002-workload-hardening/` but not built.
+An internal SRE tool for a Kubernetes cluster. Both core tasks are implemented
+in one binary: **core task 1 — on-demand network isolation between two
+workloads**, and **core task 2 — on-demand workload hardening**, which fills in
+missing resource requests and missing `securityContext` hardening after
+previewing every change and having each target approved by its own hash.
+Their specs are `specs/001-network-isolation/spec.md` and
+`specs/002-workload-hardening/spec.md`.
 
 ## What it does
 
@@ -46,6 +50,11 @@ make verify       # AC-07: live TCP/UDP traffic, before / after / removed
 make verify-crd   # AC-09: API-server schema and immutability
 make test         # unit tests, race detector
 make cover        # coverage
+
+# core task 2
+make samples-hardening      # harden-a and harden-b: five Deployments, one LimitRange
+make verify-hardening       # AC-15: preview, approve, apply, rollout, QoS, provenance
+make verify-crd-hardening   # AC-16: API-server schema and per-field immutability
 ```
 
 ## Tested versions
@@ -192,12 +201,13 @@ These are limits of NetworkPolicy, not of this implementation:
 
 ```console
 $ make test
-ok  github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1  coverage: 90.0%
-ok  github.com/joaopaulosr95/k8s-workload-hardening/pkg/controller     coverage: 91.2%
+ok  github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1  coverage: 91.7%
+ok  github.com/joaopaulosr95/k8s-workload-hardening/pkg/controller     coverage: 90.2%
+ok  github.com/joaopaulosr95/k8s-workload-hardening/pkg/plan           coverage: 98.0%
 ok  github.com/joaopaulosr95/k8s-workload-hardening/pkg/policy         coverage: 100.0%
 ```
 
-Every acceptance criterion in `specs/001-network-isolation/spec.md` has a test.
+Every acceptance criterion in both specs has a test.
 Two are worth calling out, because they are the ones most easily got wrong:
 
 **The complement truth table** (`pkg/policy/policy_test.go`). The whole feature
@@ -224,4 +234,91 @@ Nor are they evidence of RBAC. Switching the finalizer write from a PUT to a
 patch passed every unit test and then failed in-cluster with a `Forbidden`,
 because the ClusterRole granted `update` but not `patch`. Only `make deploy`
 followed by `make verify` catches that class.
+
+## Core task 2 — on-demand workload hardening
+
+Creating a `WorkloadHardening` object **previews** what would change across the
+namespaces it names. Nothing is written until the operator copies the hashes
+they accept into `spec.approvedPlan`.
+
+    kubectl apply -f deploy/samples/hardening.yaml
+    kubectl -n isolation-system get wh tenant-hardening -o jsonpath='{.status.plan[*].hash}'
+    kubectl -n isolation-system patch wh tenant-hardening --type=merge \
+      -p '{"spec":{"approvedPlan":["<hash>","<hash>"]}}'
+
+    make samples-hardening      # harden-a and harden-b, five Deployments, one LimitRange
+    make verify-hardening       # AC-15: preview, approve, apply, rollout, QoS, provenance
+    make verify-crd-hardening   # AC-16: API-server schema and per-field immutability
+
+### What it fills
+
+| Field                      | Level     | Value            | Written                  |
+| -------------------------- | --------- | ---------------- | ------------------------ |
+| `runAsNonRoot`             | pod       | `true`           | unless root is evidenced |
+| `seccompProfile.type`      | pod       | `RuntimeDefault` | always                   |
+| `allowPrivilegeEscalation` | container | `false`          | always                   |
+| `capabilities.drop`        | container | `["ALL"]`        | always                   |
+| `readOnlyRootFilesystem`   | container | `true`           | only when requested      |
+
+plus absent **resource requests**, from the values in the object. Limits are
+never written.
+
+### Decisions
+
+- **Gaps are judged on the effective value, not on what the template says.**
+  Kubernetes copies `limits` into `requests` when requests are absent, and it
+  does so when defaulting the **Pod** — never the workload template. A
+  Deployment declaring `limits: {cpu: 500m, memory: 1Gi}` and no requests runs
+  as QoS `Guaranteed` with `requests == limits`. A tool that reads templates
+  sees an absent field and calls it a gap; filling it would cut the CPU
+  reservation 50×, the memory reservation 32×, and demote the pod to
+  `Burstable`. So a `limits`-only container is a **finding**, never a gap — and
+  the same rule applies to a namespace LimitRange, whose `default` supplies the
+  request when `defaultRequest` is omitted.
+- **`runAsNonRoot` is written at pod level, so one container needing root
+  suppresses it for the whole pod.** Evidence is an explicit `privileged: true`
+  or an effective `runAsUser: 0`. Reporting such a container as a finding while
+  still writing the field is the most likely way a tool like this takes out a
+  DaemonSet: CNI agents, log shippers and node exporters are routinely
+  privileged without ever declaring `runAsUser: 0`, and no dry-run refuses it —
+  the failure is the kubelet's.
+- **Approval is per target, by hash.** A plan-wide hash cannot converge: any CI
+  deploy touching any workload in any of the named namespaces moves it. Per
+  target also lets an operator approve a subset deliberately, which is the
+  normal way to use a gate like this.
+- **No finalizer, no workload informer, no drift repair.** The tool does not own
+  the fields it writes. A reconcile loop would eventually overwrite a deliberate
+  later change — someone raising a memory limit after an OOMKill — and restart
+  pods to do it. Deleting the request leaves the patches in place, so no object
+  is ever stuck waiting on this controller.
+- **Provenance lives on the target, not only in status.** Status dies with the
+  custom resource, and an operator inspecting a workload should be able to see
+  what changed it without knowing this tool exists.
+- **Limits are never written.** The tool cannot know a workload's working set,
+  and one number spread across sixteen namespaces is guaranteed wrong for some
+  of them. A memory limit that is too small kills the container after a rollout
+  that completed green. LimitRange is the per-namespace mechanism that exists
+  for this, and the tool routes operators to it.
+
+### Limitations
+
+- **The dry-run is not a safety net for securityContext.** It catches schema,
+  admission and webhook problems. Every root-related failure is enforced by the
+  kubelet or the kernel and passes a dry-run cleanly.
+- **`Applied` means the API server accepted every approved patch.** It does not
+  assert that the resulting pods became Ready. A halted rollout is visible in
+  the workload but not in this object's status.
+- **A patched pod that becomes Ready and fails later is not detected** — a
+  denied syscall, a missing capability, a setuid exec. Those three are the
+  restricted PSS baseline and are the feature. `readOnlyRootFilesystem` is
+  opt-in precisely because its failure is reliably late.
+- **The tool cannot harden a workload that is unhardened by explicit choice.**
+  It reports it instead; it never overrules a decision someone made on purpose.
+- **A template patch restarts every pod of every target.** The preview reports
+  the pod count and the rollout mechanism per target; the tool does not stage,
+  throttle or canary.
+- **There is no undo in this version.** The provenance annotation is the
+  checkpoint one would work from.
+- **Two requests may name the same namespace**, and the second one's provenance
+  annotation replaces the first's.
 

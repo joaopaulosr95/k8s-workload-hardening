@@ -34,6 +34,45 @@ rules:
   - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations/finalizers"]
     verbs: ["update"]
+  # Workload hardening (002). Target namespaces are chosen at runtime, so this
+  # cannot be namespace-scoped.
+  #
+  # patch, not update: the whole feature is strategic merge patches, and 001's
+  # lesson is that the two are distinct verbs and only an in-cluster run
+  # catches a missing one. No create, no delete: this tool never brings a
+  # workload into existence and never removes one (NFR-03, D-09).
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "patch"]
+  # Read-only, and only to report them. A ReplicaSet owned by a Deployment is
+  # skipped because the Deployment is the target; a standalone one is out of
+  # scope (BR-04, D-08).
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  # Read-only, and only to report them. A Job's template is immutable after
+  # creation; a CronJob would need a second template path and has no rollout
+  # net at all (D-08). cronjobs is read because BR-04 requires findings to be
+  # enumerated whether or not they can be acted on, and a CronJob between
+  # schedules owns no Job to be reported through.
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  # Read-only. LimitRange decides whether a gap exists at all and whether the
+  # requested values are admissible. There is deliberately no resourcequotas
+  # permission: the reachable case is close to unconstructable and any check
+  # would be an estimate against a moving "used" figure (BR-06, D-15).
+  - apiGroups: [""]
+    resources: ["limitranges"]
+    verbs: ["get", "list"]
+  # No update on the object itself: there is no finalizer to persist, because
+  # a field written into a workload's own template needs no custodian (FR-05).
+  - apiGroups: ["hardening.acme.corp"]
+    resources: ["workloadhardenings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["hardening.acme.corp"]
+    resources: ["workloadhardenings/status"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

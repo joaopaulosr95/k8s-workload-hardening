@@ -2,7 +2,7 @@ TAG ?= dev
 IMAGE ?= ghcr.io/joaopaulosr95/k8s-workload-hardening
 CLUSTER ?= hardening
 
-.PHONY: test cover image kind-up kind-down deploy samples verify verify-crd verify-crd-hardening
+.PHONY: test cover image kind-up kind-down deploy samples verify verify-crd verify-crd-hardening samples-hardening verify-hardening
 
 test:
 	go test ./pkg/... -race
@@ -23,6 +23,7 @@ kind-down:
 deploy: image
 	kind load docker-image $(IMAGE):$(TAG) --name $(CLUSTER)
 	kubectl apply -f deploy/crd.yaml
+	kubectl apply -f deploy/crd-hardening.yaml
 	kubectl apply -f deploy/rbac.yaml
 	kubectl apply -f deploy/controller.yaml
 	kubectl -n isolation-system rollout restart deployment/network-isolation
@@ -42,3 +43,18 @@ verify-crd:
 
 verify-crd-hardening:
 	./hack/verify-crd-hardening.sh
+
+samples-hardening:
+	# From a clean slate: the tool's own annotations and patches survive a
+	# re-apply, and verify-hardening asserts that a preview has written
+	# nothing yet, so a second run would read the first run's results.
+	kubectl delete namespace harden-a harden-b --ignore-not-found --wait
+	kubectl apply -f deploy/samples/workloads-hardening.yaml
+	kubectl -n harden-a rollout status deployment/fill-me --timeout=120s
+	kubectl -n harden-a rollout status deployment/nonroot --timeout=120s
+	kubectl -n harden-a rollout status deployment/already-hardened --timeout=120s
+	kubectl -n harden-a rollout status deployment/skip-me --timeout=120s
+	kubectl -n harden-b rollout status deployment/covered --timeout=120s
+
+verify-hardening: deploy samples-hardening
+	./hack/verify-hardening.sh
