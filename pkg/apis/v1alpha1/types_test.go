@@ -82,3 +82,25 @@ func TestZeroCountsAreSerialised(t *testing.T) {
 		t.Error("matchedB dropped when zero")
 	}
 }
+
+// A stored object whose field types do not match the schema must surface as an
+// error rather than a silently half-populated struct: the reconciler would
+// otherwise write policies from a spec it never really read.
+func TestFromUnstructuredRejectsMalformedObject(t *testing.T) {
+	in := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": GroupName + "/" + Version,
+		"kind":       Kind,
+		"metadata":   map[string]any{"name": "bad", "namespace": "isolation-system"},
+		"spec": map[string]any{
+			"a": map[string]any{"namespace": int64(42)}, // namespace is a string
+		},
+	}}
+
+	iso, err := FromUnstructured(in)
+	if err == nil {
+		t.Fatalf("want an error, got %+v", iso)
+	}
+	if iso != nil {
+		t.Errorf("want a nil object alongside the error, got %+v", iso)
+	}
+}
