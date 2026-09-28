@@ -11,19 +11,19 @@ import (
 )
 
 const (
-	GroupName = "hardening.k8s.io"
+	GroupName = "hardening.acme.corp"
 	Version   = "v1alpha1"
 	Kind      = "NetworkIsolation"
 
 	// Finalizer is persisted before the first policy write, so cleanup is
 	// guaranteed a chance to run (FR-03).
-	Finalizer = "hardening.k8s.io/cleanup"
+	Finalizer = "hardening.acme.corp/cleanup"
 	// OperationLabel carries the owning object's UID on every generated policy.
 	// Only policies bearing it are ever updated or deleted.
-	OperationLabel = "hardening.k8s.io/operation"
+	OperationLabel = "hardening.acme.corp/operation"
 	// OwnerAnnotation records "<namespace>/<name>" of the owning object, so a
 	// policy event can be mapped back to the object without a lookup table.
-	OwnerAnnotation = "hardening.k8s.io/owner"
+	OwnerAnnotation = "hardening.acme.corp/owner"
 )
 
 // Resource is the GVR the dynamic client uses for NetworkIsolation objects.

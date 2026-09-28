@@ -16,14 +16,14 @@
 
 - **Module path:** `github.com/joaopaulosr95/k8s-workload-hardening`. Go 1.27.1.
 - **No new module dependencies.** `dynamic`, `dynamic/fake`, `dynamic/dynamicinformer`, `informers`, `kubernetes/fake` all live inside the already-required `k8s.io/client-go` module; they are absent from `vendor/` only because nothing imports them yet. **After adding any new k8s import, run `go mod vendor` and commit the vendor changes in the same commit.**
-- **API group/version/kind:** `hardening.k8s.io` / `v1alpha1` / `NetworkIsolation`, plural `networkisolations`, namespaced, status subresource.
-- **Finalizer:** exactly `hardening.k8s.io/cleanup`.
-- **Ownership label:** exactly `hardening.k8s.io/operation`, value = the object's UID.
-- **Owner annotation:** exactly `hardening.k8s.io/owner`, value = `<isolation namespace>/<isolation name>`.
+- **API group/version/kind:** `hardening.acme.corp` / `v1alpha1` / `NetworkIsolation`, plural `networkisolations`, namespaced, status subresource.
+- **Finalizer:** exactly `hardening.acme.corp/cleanup`.
+- **Ownership label:** exactly `hardening.acme.corp/operation`, value = the object's UID.
+- **Owner annotation:** exactly `hardening.acme.corp/owner`, value = `<isolation namespace>/<isolation name>`.
 - **Policy names:** `netiso-<uid>-a` (protects group A) and `netiso-<uid>-b` (protects group B). Deterministic, no hashing.
 - **Namespace label used in peers:** `kubernetes.io/metadata.name` (set automatically by the API server since v1.21).
 - **Protected namespaces (BR-05):** `kube-system`, `kube-public`, `kube-node-lease`, the controller's own namespace, plus anything passed on the `-protected-namespaces` flag.
-- **Never** delete, update or adopt a NetworkPolicy that does not carry this operation's UID in `hardening.k8s.io/operation` (BR-03, FR-03).
+- **Never** delete, update or adopt a NetworkPolicy that does not carry this operation's UID in `hardening.acme.corp/operation` (BR-03, FR-03).
 - **No egress rules, no `ipBlock`, no pod IP enumeration** in anything generated (FR-02).
 - **Coverage:** `go test ./pkg/... -cover` must reach ≥90% per package (NFR-05, AGENTS.md). `cmd/` is wiring and is excluded from that number.
 - **AGENTS.md role constraint:** do not edit `specs/001-network-isolation/spec.md`. If the implementation needs behaviour the spec does not describe, stop and raise it.
@@ -198,19 +198,19 @@ import (
 )
 
 const (
-	GroupName = "hardening.k8s.io"
+	GroupName = "hardening.acme.corp"
 	Version   = "v1alpha1"
 	Kind      = "NetworkIsolation"
 
 	// Finalizer is persisted before the first policy write, so cleanup is
 	// guaranteed a chance to run (FR-03).
-	Finalizer = "hardening.k8s.io/cleanup"
+	Finalizer = "hardening.acme.corp/cleanup"
 	// OperationLabel carries the owning object's UID on every generated policy.
 	// Only policies bearing it are ever updated or deleted.
-	OperationLabel = "hardening.k8s.io/operation"
+	OperationLabel = "hardening.acme.corp/operation"
 	// OwnerAnnotation records "<namespace>/<name>" of the owning object, so a
 	// policy event can be mapped back to the object without a lookup table.
-	OwnerAnnotation = "hardening.k8s.io/owner"
+	OwnerAnnotation = "hardening.acme.corp/owner"
 )
 
 // Resource is the GVR the dynamic client uses for NetworkIsolation objects.
@@ -716,9 +716,9 @@ Create `deploy/crd.yaml`:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: networkisolations.hardening.k8s.io
+  name: networkisolations.hardening.acme.corp
 spec:
-  group: hardening.k8s.io
+  group: hardening.acme.corp
   scope: Namespaced
   names:
     plural: networkisolations
@@ -831,10 +831,10 @@ spec:
 ```bash
 kind create cluster --name hardening --config hack/kind/cluster.yaml
 kubectl apply -f deploy/crd.yaml
-kubectl get crd networkisolations.hardening.k8s.io
+kubectl get crd networkisolations.hardening.acme.corp
 ```
 
-Expected: `customresourcedefinition.apiextensions.k8s.io/networkisolations.hardening.k8s.io created`, then the CRD listed. A schema error appears here, not later.
+Expected: `customresourcedefinition.apiextensions.k8s.io/networkisolations.hardening.acme.corp created`, then the CRD listed. A schema error appears here, not later.
 
 - [ ] **Step 3: Write the validation script**
 
@@ -867,7 +867,7 @@ kubectl apply -f deploy/crd.yaml >/dev/null
 kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 expect_reject "object missing group b" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: missing-b, namespace: $ns}
 spec:
@@ -875,7 +875,7 @@ spec:
 EOF
 
 expect_reject "matchExpressions supplied" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: with-expressions, namespace: $ns}
 spec:
@@ -888,7 +888,7 @@ spec:
 EOF
 
 expect_reject "empty matchLabels" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: empty-labels, namespace: $ns}
 spec:
@@ -897,7 +897,7 @@ spec:
 EOF
 
 expect_reject "invalid namespace name" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: bad-namespace, namespace: $ns}
 spec:
@@ -907,7 +907,7 @@ EOF
 
 # A prefixed label key is legal and must be accepted (Review Focus 4).
 cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
@@ -917,7 +917,7 @@ EOF
 echo "ok    accepted: valid object with a prefixed label key"
 
 expect_reject "edit to an immutable spec" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
@@ -927,7 +927,7 @@ EOF
 
 # Re-applying the identical spec must still be allowed: self == oldSelf holds.
 cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
@@ -2830,13 +2830,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "namespaces"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["hardening.k8s.io"]
+  - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations"]
     verbs: ["get", "list", "watch", "update"]
-  - apiGroups: ["hardening.k8s.io"]
+  - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["hardening.k8s.io"]
+  - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations/finalizers"]
     verbs: ["update"]
 ---
@@ -3000,7 +3000,7 @@ spec:
 Create `deploy/samples/isolation.yaml`:
 
 ```yaml
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata:
   name: gateway-dashboard
@@ -3220,7 +3220,7 @@ check reachable "B->A pod IP   TCP" probe tenant-b dashboard tcp "$gwIP"
 check reachable "B->A pod IP   UDP" probe tenant-b dashboard udp "$gwIP"
 check reachable "A->B ClusterIP TCP" probe tenant-a gateway   tcp "$dashSvc"
 
-left=$(kubectl get networkpolicies -A -l hardening.k8s.io/operation -o name | wc -l | tr -d ' ')
+left=$(kubectl get networkpolicies -A -l hardening.acme.corp/operation -o name | wc -l | tr -d ' ')
 if [ "$left" != "0" ]; then
   echo "FAIL  $left owned policies survived deletion"
   fail=1
@@ -3401,4 +3401,4 @@ Covers AC-07 and the NFR-06 reproducibility requirements."
    policies exist and stay, so `Degraded` and retried. Task 5, Step 11 pins both
    halves, and covers the `Degraded`→`Active` recovery the spec lists as a gap
    (G-03).
-3. **The owner annotation.** `hardening.k8s.io/owner` is not in the spec. It exists so a NetworkPolicy event can be mapped back to its owning object without an in-memory index, which FR-04's "watch NetworkPolicy objects" otherwise requires. It is additive metadata on a policy this operation owns; it changes no behaviour the spec describes.
+3. **The owner annotation.** `hardening.acme.corp/owner` is not in the spec. It exists so a NetworkPolicy event can be mapped back to its owning object without an in-memory index, which FR-04's "watch NetworkPolicy objects" otherwise requires. It is additive metadata on a policy this operation owns; it changes no behaviour the spec describes.

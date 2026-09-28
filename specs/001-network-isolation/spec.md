@@ -91,12 +91,12 @@ no snapshot of foreign resources.
 
 ### FR-01 — Interface
 
-A namespaced CRD: group `hardening.k8s.io`, version `v1alpha1`, kind `NetworkIsolation`, with a
+A namespaced CRD: group `hardening.acme.corp`, version `v1alpha1`, kind `NetworkIsolation`, with a
 structural schema and the status subresource. Both groups declare their namespace explicitly, so the
 object can live in a namespace of the operator's choosing — including one neither group occupies.
 
 ```yaml
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata:
   name: gateway-dashboard
@@ -145,7 +145,7 @@ Policy names are derived deterministically from the operation UID, and each poli
 label. Only policies bearing it are ever updated or deleted; a name collision with a foreign object is
 reported, never overwritten.
 
-Before writing any policy, persist the finalizer `hardening.k8s.io/cleanup`. On deletion: remove both
+Before writing any policy, persist the finalizer `hardening.acme.corp/cleanup`. On deletion: remove both
 owned policies, tolerating ones already absent, then remove the finalizer. Cleanup must not depend on
 matching pods, namespaces or preconditions still being valid. Cross-namespace owner references do not
 work, so cleanup is explicit.
