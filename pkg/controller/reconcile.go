@@ -207,9 +207,58 @@ func refresh(iso *v1alpha1.NetworkIsolation, from *unstructured.Unstructured) er
 	return nil
 }
 
-// cleanup is implemented in the next task. It fails loudly rather than
-// returning nil: a deletion pass that silently succeeds would drop the
-// finalizer with the policies still in place.
-func (r *Reconciler) cleanup(context.Context, klog.Logger, *v1alpha1.NetworkIsolation) error {
-	return errors.New("cleanup not implemented")
+// cleanup removes the policies this operation owns, then the finalizer. It must
+// not depend on matching pods, namespaces or preconditions still being valid
+// (FR-03). Cross-namespace owner references do not work, so this is explicit.
+func (r *Reconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alpha1.NetworkIsolation) error {
+	if !slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
+		// Nothing was ever written under this operation, so there is nothing
+		// to undo and nothing holding the object back.
+		return nil
+	}
+
+	if err := r.setStatus(ctx, iso, v1alpha1.Status{
+		Phase: v1alpha1.PhaseDeleting,
+		Peers: iso.Status.Peers,
+	}); err != nil {
+		return err
+	}
+
+	names := policy.Names(string(iso.UID))
+	for i, g := range iso.Spec.Peers {
+		if i >= len(names) {
+			break
+		}
+		if err := r.deletePolicy(ctx, g.Namespace, names[i], string(iso.UID)); err != nil {
+			// An API error is not evidence the policy is gone. Keep the
+			// finalizer and retry (FR-03).
+			logger.Error(err, "Cleanup incomplete, finalizer retained", "policy", g.Namespace+"/"+names[i])
+			return err
+		}
+	}
+
+	iso.Finalizers = slices.DeleteFunc(iso.Finalizers, func(f string) bool { return f == v1alpha1.Finalizer })
+	logger.Info("Cleaned up", "policies", names)
+	return r.update(ctx, iso)
+}
+
+// deletePolicy removes one policy if this operation owns it. An already absent
+// policy is success; a policy under the same name owned by anyone else is left
+// untouched.
+func (r *Reconciler) deletePolicy(ctx context.Context, namespace, name, uid string) error {
+	api := r.Kube.NetworkingV1().NetworkPolicies(namespace)
+	got, err := api.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if got.Labels[v1alpha1.OperationLabel] != uid {
+		return nil
+	}
+	if err := api.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }

@@ -362,3 +362,141 @@ func TestConflictOnStatusWriteRequeues(t *testing.T) {
 		t.Errorf("phase = %q, want Active", got.Status.Phase)
 	}
 }
+
+// deleting returns an active isolation marked for deletion, as the API server
+// presents it once a finalizer is holding it.
+func deleting() *v1alpha1.NetworkIsolation {
+	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+	now := metav1.Now()
+	object.DeletionTimestamp = &now
+	object.Finalizers = []string{v1alpha1.Finalizer}
+	names := policy.Names(uid)
+	object.Status = v1alpha1.Status{Phase: v1alpha1.PhaseActive, Peers: []v1alpha1.PeerStatus{
+		{Policy: names[0], Matched: 1}, {Policy: names[1], Matched: 1},
+	}}
+	return object
+}
+
+func ownedPolicy(namespace, name string) *networkingv1.NetworkPolicy {
+	return netpol(namespace, name, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		map[string]string{v1alpha1.OperationLabel: uid})
+}
+
+// AC-04: both policies go, then the finalizer.
+func TestCleanupRemovesPoliciesThenFinalizer(t *testing.T) {
+	object := deleting()
+	names := policy.Names(uid)
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", names[0]), ownedPolicy("tenant-b", names[1]))
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	for i, p := range []struct{ ns, name string }{{"tenant-a", names[0]}, {"tenant-b", names[1]}} {
+		if _, err := r.Kube.NetworkingV1().NetworkPolicies(p.ns).Get(context.Background(), p.name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Errorf("policy %d still present (err %v)", i, err)
+		}
+	}
+	if got := stored(t, r, object); len(got.Finalizers) != 0 {
+		t.Errorf("finalizers = %v, want empty", got.Finalizers)
+	}
+}
+
+// AC-04: policies already gone is success, not a stall.
+func TestCleanupToleratesAbsentPolicies(t *testing.T) {
+	object := deleting()
+	r := newReconciler() // no namespaces, no policies: everything is already gone
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := stored(t, r, object); len(got.Finalizers) != 0 {
+		t.Errorf("finalizers = %v, want empty", got.Finalizers)
+	}
+}
+
+// AC-04: an API error is not evidence of absence. The finalizer stays.
+func TestCleanupKeepsFinalizerOnAPIError(t *testing.T) {
+	object := deleting()
+	names := policy.Names(uid)
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", names[0]), ownedPolicy("tenant-b", names[1]))
+	r.Dyn = dynClient(t, object)
+
+	r.Kube.(*fake.Clientset).PrependReactor("delete", "networkpolicies", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.(k8stesting.DeleteAction).GetName() == names[1] {
+			return true, nil, apierrors.NewInternalError(errors.New("apiserver unreachable"))
+		}
+		return false, nil, nil
+	})
+
+	if err := r.Reconcile(context.Background(), key(object)); err == nil {
+		t.Error("want an error so deletion is retried")
+	}
+	if got := stored(t, r, object); len(got.Finalizers) != 1 {
+		t.Errorf("finalizers = %v, want the finalizer retained", got.Finalizers)
+	}
+}
+
+// AC-04: a restart mid-deletion resumes. A pass over an object with a
+// deletionTimestamp must never recreate a policy, whatever the preconditions
+// would say.
+func TestCleanupNeverRecreates(t *testing.T) {
+	object := deleting()
+	names := policy.Names(uid)
+	// Only one policy survived the crash; the other was already removed.
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", names[0]))
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	for _, a := range r.Kube.(*fake.Clientset).Actions() {
+		if a.GetVerb() == "create" || a.GetVerb() == "update" {
+			t.Errorf("deletion pass wrote a policy: %s", a.GetVerb())
+		}
+	}
+	for i, p := range []struct{ ns, name string }{{"tenant-a", names[0]}, {"tenant-b", names[1]}} {
+		if _, err := r.Kube.NetworkingV1().NetworkPolicies(p.ns).Get(context.Background(), p.name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Errorf("policy %d present after cleanup (err %v)", i, err)
+		}
+	}
+}
+
+// A policy occupying one of our names but owned by someone else is left alone,
+// even during cleanup (FR-03).
+func TestCleanupLeavesForeignPolicyAlone(t *testing.T) {
+	object := deleting()
+	names := policy.Names(uid)
+	foreign := netpol("tenant-a", names[0], []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		map[string]string{v1alpha1.OperationLabel: "some-other-uid"})
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), foreign)
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), names[0], metav1.GetOptions{}); err != nil {
+		t.Errorf("foreign policy was deleted: %v", err)
+	}
+}
+
+// Review Focus 2: an object that was Rejected never got a finalizer. Deleting
+// it must be a no-op — no status write, no attempt to strip a finalizer that
+// isn't there, no API calls that would fail against a missing namespace.
+func TestCleanupWithoutFinalizerIsANoOp(t *testing.T) {
+	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+	now := metav1.Now()
+	object.DeletionTimestamp = &now
+	object.Status = v1alpha1.Status{Phase: v1alpha1.PhaseRejected, Message: `namespace "tenant-b" does not exist`}
+
+	r := newReconciler()
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertNoWrites(t, r)
+	assertNoCustomResourceWrites(t, r)
+}
