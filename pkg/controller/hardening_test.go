@@ -487,3 +487,237 @@ func TestUnreadableSpecIsRejectedNotRetriedForever(t *testing.T) {
 		t.Errorf("%d cluster calls made for an object that cannot be planned", n)
 	}
 }
+
+// armed returns w with the given hashes approved, stored in the fake.
+func arm(t *testing.T, r *HardeningReconciler, w *v1alpha1.WorkloadHardening, hashes ...string) *v1alpha1.WorkloadHardening {
+	t.Helper()
+	current := storedHardening(t, r, w)
+	current.Spec.ApprovedPlan = hashes
+	// The API server bumps metadata.generation on every write that changes
+	// spec; the dynamic fake does not. FR-05's terminality gate compares it
+	// against status.observedGeneration, so a test that left it alone could
+	// never exercise a re-approval at all — the same class of gap as the fake
+	// clientset ignoring DryRun. Status writes go through UpdateStatus and
+	// correctly do not move it.
+	current.Generation++
+	u, err := v1alpha1.HardeningToUnstructured(current)
+	if err != nil {
+		t.Fatalf("HardeningToUnstructured: %v", err)
+	}
+	if _, err := r.Dyn.Resource(v1alpha1.HardeningResource).Namespace(w.Namespace).
+		Update(context.Background(), u, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("arming the request: %v", err)
+	}
+	return current
+}
+
+// AC-09: an approved target is patched while an unrelated workload appearing
+// in the same namespace is reported Unapproved without blocking it or the
+// phase; a target whose own change moved is Stale and holds the object in
+// PartiallyApplied.
+func TestPerTargetApproval(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	// Preview, then approve api's hash.
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	apiHash := rowFor(storedHardening(t, r, w), "Deployment", "api").Hash
+	if apiHash == "" {
+		t.Fatal("no hash published for api")
+	}
+	arm(t, r, w, apiHash)
+
+	// A workload nobody approved appears in the same namespace.
+	if _, err := r.Kube.AppsV1().Deployments("tenant-a").
+		Create(context.Background(), deployment("tenant-a", "newcomer"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the newcomer: %v", err)
+	}
+
+	r.Kube.(*fake.Clientset).ClearActions()
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if got.Status.Phase != v1alpha1.PhaseApplied {
+		t.Errorf("phase = %q (%s), want Applied: Unapproved is not a failure", got.Status.Phase, got.Status.Message)
+	}
+	if api := rowFor(got, "Deployment", "api"); api.Outcome != v1alpha1.OutcomePatched {
+		t.Errorf("api outcome = %q, want Patched", api.Outcome)
+	}
+	newcomer := rowFor(got, "Deployment", "newcomer")
+	if newcomer.Outcome != v1alpha1.OutcomeUnapproved {
+		t.Errorf("newcomer outcome = %q, want Unapproved", newcomer.Outcome)
+	}
+	if newcomer.Hash == "" {
+		t.Error("the newcomer's hash was not published; the operator cannot approve what it cannot see")
+	}
+	if !strings.Contains(got.Status.Message, "unapproved") {
+		t.Errorf("message = %q, want the unapproved count named (FR-06)", got.Status.Message)
+	}
+
+	// The approved target was patched for real, and the unapproved one was
+	// never written to at all — not even a dry-run.
+	patched := storedTemplate(t, r, "tenant-a", "api")
+	if patched.Spec.Template.Spec.SecurityContext == nil || patched.Spec.Template.Spec.SecurityContext.RunAsNonRoot == nil {
+		t.Error("api was not patched")
+	}
+	for _, p := range patchActions(t, r) {
+		if p.Name == "newcomer" {
+			t.Error("the unapproved target was sent to the API server")
+		}
+	}
+	untouched := storedTemplate(t, r, "tenant-a", "newcomer")
+	if untouched.Annotations[v1alpha1.FilledAnnotation] != "" {
+		t.Error("the unapproved target was annotated")
+	}
+}
+
+// AC-09, the Stale half: a target whose own change moved since approval is not
+// patched, its new hash is published for re-approval, and the object is held
+// in PartiallyApplied, which is non-terminal and re-evaluated until the
+// approval is updated.
+func TestStaleApprovalHoldsPartiallyApplied(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	stale := rowFor(storedHardening(t, r, w), "Deployment", "api").Hash
+	arm(t, r, w, stale)
+
+	// Someone edits the workload in a way that changes its gaps.
+	d := storedTemplate(t, r, "tenant-a", "api")
+	d.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("50m"),
+	}
+	if _, err := r.Kube.AppsV1().Deployments("tenant-a").Update(context.Background(), d, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("editing api: %v", err)
+	}
+
+	r.Kube.(*fake.Clientset).ClearActions()
+	// Stale is not retryable: recomputing produces the same refusal until a
+	// human updates the approval, so spinning the backoff would be pointless.
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if got.Status.Phase != v1alpha1.PhasePartiallyApplied {
+		t.Errorf("phase = %q, want PartiallyApplied", got.Status.Phase)
+	}
+	api := rowFor(got, "Deployment", "api")
+	if api.Outcome != v1alpha1.OutcomeStale {
+		t.Errorf("api outcome = %q, want Stale", api.Outcome)
+	}
+	if api.Hash == stale || api.Hash == "" {
+		t.Errorf("hash = %q, want the new one published for re-approval", api.Hash)
+	}
+	if !strings.Contains(api.Reason, api.Hash) {
+		t.Errorf("reason = %q, want it to name the hash to re-approve", api.Reason)
+	}
+	if n := len(patchActions(t, r)); n != 0 {
+		t.Errorf("issued %d patches for a stale target, want 0", n)
+	}
+
+	// Re-approving the new hash converges.
+	arm(t, r, w, api.Hash)
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("re-approved apply: %v", err)
+	}
+	if got := storedHardening(t, r, w); got.Status.Phase != v1alpha1.PhaseApplied {
+		t.Errorf("phase after re-approval = %q (%s), want Applied", got.Status.Phase, got.Status.Message)
+	}
+}
+
+// An apply always dry-runs the patch in the same pass, cache or not: the cache
+// key is the target's own change, which does not move when a webhook is
+// installed, a namespace gains a Pod Security label or a LimitRange appears
+// (AC-10's apply half, FR-03, NFR-02).
+func TestApplyAlwaysDryRunsFirst(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	// The preview cached a clean dry-run for this exact change.
+	arm(t, r, w, rowFor(storedHardening(t, r, w), "Deployment", "api").Hash)
+
+	r.Kube.(*fake.Clientset).ClearActions()
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	patches := patchActions(t, r)
+	if len(patches) != 2 {
+		t.Fatalf("issued %d patches, want a dry-run then the write", len(patches))
+	}
+	if !slices.Contains(patches[0].PatchOptions.DryRun, metav1.DryRunAll) {
+		t.Error("the first patch was not a dry-run; no write may precede a dry-run of that same patch")
+	}
+	if len(patches[1].PatchOptions.DryRun) != 0 {
+		t.Error("the second patch was still a dry-run; nothing was written")
+	}
+	// Both carry the same body, so the thing verified is the thing written.
+	if string(patches[0].Patch) != string(patches[1].Patch) {
+		t.Error("the dry-run and the write carried different bodies")
+	}
+}
+
+// AC-11 on the wire: every applied patch carries the annotation in the same
+// request, recording leaf paths and the values written.
+func TestProvenanceRidesInTheSameRequest(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	arm(t, r, w, rowFor(storedHardening(t, r, w), "Deployment", "api").Hash)
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	for _, p := range patchActions(t, r) {
+		if !strings.Contains(string(p.Patch), v1alpha1.FilledAnnotation) {
+			t.Errorf("a patch of %s carried no provenance annotation:\n%s", p.Name, p.Patch)
+		}
+	}
+
+	filled := storedTemplate(t, r, "tenant-a", "api").Annotations[v1alpha1.FilledAnnotation]
+	if filled == "" {
+		t.Fatal("no provenance annotation on the patched target")
+	}
+	for _, want := range []string{
+		"spec.template.spec.securityContext.runAsNonRoot=true",
+		"spec.template.spec.securityContext.seccompProfile.type=RuntimeDefault",
+		"spec.template.spec.containers[app].securityContext.allowPrivilegeEscalation=false",
+		"spec.template.spec.containers[app].securityContext.capabilities.drop=[ALL]",
+		"spec.template.spec.containers[app].resources.requests.cpu=10m",
+		"spec.template.spec.containers[app].resources.requests.memory=32Mi",
+	} {
+		if !strings.Contains(filled, want) {
+			t.Errorf("annotation missing %q:\n%s", want, filled)
+		}
+	}
+	// Leaf paths, so an undo removes exactly what was added rather than a
+	// block a human may have written afterwards (BR-08).
+	for _, line := range strings.Split(filled, "\n") {
+		path, _, _ := strings.Cut(line, "=")
+		if path == "spec.template.spec.containers[app].resources" || path == "spec.template.spec.securityContext" {
+			t.Errorf("a non-leaf path reached the annotation: %q", line)
+		}
+	}
+}

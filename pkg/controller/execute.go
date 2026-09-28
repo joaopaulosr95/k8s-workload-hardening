@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
@@ -113,8 +115,12 @@ func (r *HardeningReconciler) forget(w *v1alpha1.WorkloadHardening, ref plan.Tar
 	delete(r.verified, cacheKey(w, ref))
 }
 
-// apply is written in Task 8. The stub keeps Task 7 compiling; it must be
-// replaced, not kept.
+// apply patches a target whose own change hash the operator approved (BR-07).
+//
+// Each target is decided on its own hash, never on a plan-wide one. A single
+// plan-wide hash cannot converge in a live environment: any CI deploy touching
+// any workload in any of up to sixteen namespaces moves it, so the operator
+// re-copies the hash and is stale again before the write lands.
 func (r *HardeningReconciler) apply(
 	ctx context.Context,
 	logger klog.Logger,
@@ -123,14 +129,194 @@ func (r *HardeningReconciler) apply(
 	body []byte,
 	row v1alpha1.TargetStatus,
 ) v1alpha1.TargetStatus {
-	row.Outcome = v1alpha1.OutcomeUnapproved
+	switch {
+	case w.Approved(row.Hash):
+		// Patched below.
+	case approvedEarlier(w, t.Ref):
+		// The operator approved a hash for this target, and it no longer
+		// describes it. Publish the new one for re-approval (BR-07).
+		row.Outcome = v1alpha1.OutcomeStale
+		row.Reason = "the approved change no longer describes this target; re-approve " + row.Hash
+		logger.Info("Stale", "target", t.Ref.String(), "hash", row.Hash)
+		return row
+	default:
+		// Appeared after the approval. Not a failure, and it never triggers a
+		// retry: approving a subset is the expected use of a per-target gate
+		// (FR-04, FR-06).
+		row.Outcome = v1alpha1.OutcomeUnapproved
+		row.Reason = "not in spec.approvedPlan; add " + row.Hash + " to approve it"
+		return row
+	}
+
+	// No write before a dry-run of that same patch, in the same pass, has been
+	// accepted. The cache is not consulted here: its key is the target's own
+	// change, which does not move when a webhook is installed, a namespace
+	// gains a Pod Security label or a LimitRange appears, so a cached
+	// acceptance says nothing about whether this write will be accepted now
+	// (FR-03, NFR-02).
+	if err := t.patch(ctx, body, dryRun()); err != nil {
+		logger.Info("Dry-run rejected", "target", t.Ref.String(), "reason", err.Error())
+		row.Outcome = v1alpha1.OutcomeFailed
+		row.Reason = "dry-run rejected: " + err.Error()
+		r.forget(w, t.Ref)
+		return row
+	}
+
+	if err := t.patch(ctx, body, metav1.PatchOptions{}); err != nil {
+		// Keep what succeeded elsewhere and never roll back: a half-hardened
+		// namespace is not improved by un-hardening the half that worked
+		// (FR-04). An API error is never assumed to have landed.
+		logger.Error(err, "Patch failed", "target", t.Ref.String(), "hash", row.Hash)
+		row.Outcome = v1alpha1.OutcomeFailed
+		row.Reason = err.Error()
+		return row
+	}
+
+	row.Outcome = v1alpha1.OutcomePatched
+	logger.Info("Patched", "target", t.Ref.String(), "hash", row.Hash, "fields", row.Fields, "pods", row.Pods)
 	return row
 }
 
-// phaseFor and carry are written in Task 8. These stubs keep Task 7 compiling;
-// they must be replaced, not kept.
-func phaseFor(w *v1alpha1.WorkloadHardening, rows []v1alpha1.TargetStatus) (v1alpha1.Phase, string) {
-	return v1alpha1.PhasePreviewed, fmt.Sprintf("%d targets would change", len(rows))
+// approvedEarlier reports whether an earlier pass published a hash for this
+// target that the operator then approved.
+//
+// That is what separates Stale — the operator approved a change that no longer
+// exists — from Unapproved, a target that appeared after the approval. The
+// previous status.plan is the only record of what was published, so it is what
+// the distinction is drawn from (BR-07).
+//
+// With no such record — a first armed pass carrying hashes copied from
+// elsewhere, or a cleared status — this returns false and the target reports
+// Unapproved. BR-07 sanctions that degradation and bounds it to the label: the
+// phase turns on unmatched hashes (FR-06), which need no history.
+func approvedEarlier(w *v1alpha1.WorkloadHardening, ref plan.Target) bool {
+	for _, row := range w.Status.Plan {
+		if row.Namespace == ref.Namespace && row.Kind == ref.Kind && row.Name == ref.Name {
+			return w.Approved(row.Hash)
+		}
+	}
+	return false
 }
 
-func carry(previous, rows []v1alpha1.TargetStatus) []v1alpha1.TargetStatus { return rows }
+// rowKey orders and identifies a plan row: namespace, kind, name — the same
+// deterministic order execution uses (FR-04).
+func rowKey(row v1alpha1.TargetStatus) string {
+	return row.Namespace + "/" + row.Kind + "/" + row.Name
+}
+
+// carry brings forward the Patched rows of the previous status for targets the
+// recomputed plan no longer names.
+//
+// An already-patched target has no gaps left (BR-01), so it drops out of the
+// plan entirely — and an Applied object whose status showed an empty plan
+// would tell an operator nothing about what it did. It is also what lets
+// phaseFor tell "everything approved has landed" from "the approval matched
+// nothing".
+func carry(previous, rows []v1alpha1.TargetStatus) []v1alpha1.TargetStatus {
+	named := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		named[rowKey(row)] = true
+	}
+	for _, row := range previous {
+		if row.Outcome == v1alpha1.OutcomePatched && !named[rowKey(row)] {
+			rows = append(rows, row)
+		}
+	}
+	slices.SortFunc(rows, func(a, b v1alpha1.TargetStatus) int {
+		return strings.Compare(rowKey(a), rowKey(b))
+	})
+	return rows
+}
+
+// danglingApprovals counts the hashes in spec.approvedPlan that match no row in
+// the status at all — neither a target that has gaps now, nor one this object
+// patched earlier and carried forward.
+//
+// This is the history-free half of BR-07's gate, and it is deliberately kept
+// out of the history-dependent path. Telling Stale from Unapproved needs the
+// previously published status.plan and degrades to Unapproved when that is
+// gone; whether an approval pointed at anything real does not need history at
+// all. Folding the phase on this instead of on the Stale count means a cleared
+// status costs a row's label and never lets the object go terminal with the
+// operator's approval silently unapplied.
+func danglingApprovals(w *v1alpha1.WorkloadHardening, rows []v1alpha1.TargetStatus) int {
+	present := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		present[row.Hash] = true
+	}
+	var n int
+	for _, h := range w.Spec.ApprovedPlan {
+		if !present[h] {
+			n++
+		}
+	}
+	return n
+}
+
+// phaseFor folds the per-target outcomes into the object's phase (FR-06).
+func phaseFor(w *v1alpha1.WorkloadHardening, rows []v1alpha1.TargetStatus) (v1alpha1.Phase, string) {
+	var patched, failed, stale, unapproved int
+	for _, row := range rows {
+		switch row.Outcome {
+		case v1alpha1.OutcomePatched:
+			patched++
+		case v1alpha1.OutcomeFailed:
+			failed++
+		case v1alpha1.OutcomeStale:
+			stale++
+		case v1alpha1.OutcomeUnapproved:
+			unapproved++
+		}
+	}
+
+	if !w.Armed() {
+		if failed > 0 {
+			return v1alpha1.PhasePreviewed, fmt.Sprintf(
+				"%d targets would change; %d were refused by the dry-run", len(rows), failed)
+		}
+		if len(rows) == 0 {
+			return v1alpha1.PhasePreviewed, "no gaps found"
+		}
+		return v1alpha1.PhasePreviewed, fmt.Sprintf(
+			"%d targets would change; approve them by copying their hashes into spec.approvedPlan", len(rows))
+	}
+
+	dangling := danglingApprovals(w, rows)
+
+	switch {
+	case failed > 0 || stale > 0:
+		// Stale is a failure of a different kind — the operator approved a
+		// change that no longer exists — so it holds the object in
+		// PartiallyApplied, which is non-terminal and re-evaluated until the
+		// approval is updated (FR-06).
+		return v1alpha1.PhasePartiallyApplied, fmt.Sprintf(
+			"%d patched, %d failed, %d stale, %d unapproved", patched, failed, stale, unapproved)
+	case dangling == len(w.Spec.ApprovedPlan) && patched == 0:
+		// Nothing the operator approved exists. Applied is terminal, so
+		// reporting it here would strand the request with the approval having
+		// done nothing, forever, and no resync would ever look again.
+		return v1alpha1.PhasePartiallyApplied, fmt.Sprintf(
+			"none of the %d approved hashes matches a target with gaps; %d targets are unapproved",
+			len(w.Spec.ApprovedPlan), unapproved)
+	case dangling > 0:
+		// Some landed and some pointed at nothing. This is the case a count of
+		// Stale rows misses: the successful patches would otherwise carry the
+		// object to Applied, which is terminal, and the approvals that matched
+		// nothing would never be looked at again.
+		return v1alpha1.PhasePartiallyApplied, fmt.Sprintf(
+			"%d patched; %d of the %d approved hashes matches no target with gaps",
+			patched, dangling, len(w.Spec.ApprovedPlan))
+	case patched > 0:
+		// Unapproved is not a failure. An object whose approved targets all
+		// patched is Applied however many targets it left alone (FR-06).
+		return v1alpha1.PhaseApplied, fmt.Sprintf("%d patched, %d left unapproved", patched, unapproved)
+	default:
+		// Armed, nothing approved is missing, and nothing was patched: every
+		// approved hash names a row the plan still reports but cannot act on —
+		// a refused target (BR-04), for instance. Non-terminal, so it recovers
+		// by itself if the refusal clears.
+		return v1alpha1.PhasePartiallyApplied, fmt.Sprintf(
+			"%d approved hashes matched no patchable target; %d targets are unapproved",
+			len(w.Spec.ApprovedPlan), unapproved)
+	}
+}
