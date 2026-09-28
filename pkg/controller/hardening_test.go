@@ -2,14 +2,17 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -253,5 +256,234 @@ func TestValidationIsAllOrNothing(t *testing.T) {
 				t.Errorf("issued %d patches, want none: the whole object is rejected", n)
 			}
 		})
+	}
+}
+
+// AC-10, the unarmed half: an unchanged target is not re-dry-run on resync,
+// and a changed one is. The alternative is re-running the full admission
+// chain, every webhook included, for every target in up to sixteen namespaces
+// on every resync, forever, on behalf of an object nobody armed (FR-03).
+func TestUnarmedResyncSkipsUnchangedTargets(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"), deployment("tenant-a", "web"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if n := len(patchActions(t, r)); n != 2 {
+		t.Fatalf("first pass issued %d dry-runs, want 2", n)
+	}
+	first := storedHardening(t, r, w)
+	apiHash := rowFor(first, "Deployment", "api").Hash
+
+	// Second pass, nothing changed: no dry-run at all. Both fakes are cleared:
+	// the dynamic one still holds the first pass's status write, and the
+	// assertion below is about this pass only.
+	r.Kube.(*fake.Clientset).ClearActions()
+	r.Dyn.(*dynamicfake.FakeDynamicClient).ClearActions()
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if n := len(patchActions(t, r)); n != 0 {
+		t.Errorf("second pass issued %d dry-runs, want 0: both targets are unchanged", n)
+	}
+	// Status is unchanged too, so the pass issues no write of any kind.
+	for _, a := range r.Dyn.(*dynamicfake.FakeDynamicClient).Actions() {
+		switch a.GetVerb() {
+		case "get", "list", "watch":
+		default:
+			t.Errorf("unexpected write on an unchanged resync: %s %s", a.GetVerb(), a.GetSubresource())
+		}
+	}
+
+	// Now move one target's change: give web an explicit request, so its gap
+	// set shrinks and its hash moves. The other target is untouched.
+	web := storedTemplate(t, r, "tenant-a", "web")
+	web.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("50m"),
+	}
+	if _, err := r.Kube.AppsV1().Deployments("tenant-a").Update(context.Background(), web, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("moving web's change: %v", err)
+	}
+
+	r.Kube.(*fake.Clientset).ClearActions()
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("third pass: %v", err)
+	}
+	patches := patchActions(t, r)
+	if len(patches) != 1 || patches[0].Name != "web" {
+		t.Fatalf("third pass dry-ran %v, want only web", patches)
+	}
+
+	third := storedHardening(t, r, w)
+	if got := rowFor(third, "Deployment", "api").Hash; got != apiHash {
+		t.Errorf("api's hash moved from %s to %s although nothing about it changed", apiHash, got)
+	}
+	if rowFor(third, "Deployment", "web").Hash == rowFor(first, "Deployment", "web").Hash {
+		t.Error("web's hash did not move although its gaps changed")
+	}
+}
+
+// A dry-run refusal is this target's outcome, and the other targets are
+// unaffected (FR-03, error table).
+func TestDryRunRefusalIsPerTarget(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"), deployment("tenant-a", "web"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	r.Kube.(*fake.Clientset).PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.(k8stesting.PatchActionImpl).Name == "api" {
+			return true, nil, apierrors.NewInternalError(
+				errors.New(`admission webhook "mutate.example.com" does not declare sideEffects: None or NoneOnDryRun`))
+		}
+		return false, nil, nil
+	})
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err == nil {
+		t.Error("want an error so the key is requeued")
+	}
+
+	got := storedHardening(t, r, w)
+	api := rowFor(got, "Deployment", "api")
+	if api.Outcome != v1alpha1.OutcomeFailed {
+		t.Errorf("api outcome = %q, want Failed", api.Outcome)
+	}
+	if !strings.Contains(api.Reason, "sideEffects") {
+		t.Errorf("api reason = %q, want the API server's own message, not a swallowed one", api.Reason)
+	}
+	if web := rowFor(got, "Deployment", "web"); web.Outcome != v1alpha1.OutcomePlanned {
+		t.Errorf("web outcome = %q, want Planned: other targets are unaffected", web.Outcome)
+	}
+
+	// A refused target is not cached, so the next pass tries again.
+	r.Kube.(*fake.Clientset).ClearActions()
+	_ = r.Reconcile(context.Background(), hardeningKey(w))
+	var retried bool
+	for _, p := range patchActions(t, r) {
+		if p.Name == "api" {
+			retried = true
+		}
+	}
+	if !retried {
+		t.Error("the refused target was not re-sent; a failed dry-run must not be cached as an acceptance")
+	}
+}
+
+// Review Focus 4: a target with no gaps yields no patch and no API call —
+// stated in FR-02 but named by no acceptance criterion. It is also what makes
+// AC-13's convergence work: an already-patched target has no gaps left, so a
+// retry addresses only what failed.
+func TestFullyHardenedTargetIssuesNoAPICall(t *testing.T) {
+	hardened := deployment("tenant-a", "already-hardened", func(d *appsv1.Deployment) {
+		d.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
+			RunAsNonRoot:   ptrTo(true),
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		}
+		d.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptrTo(false),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		}
+		// Limits and no requests: the effective request equals the limit, so
+		// there is no resource gap either, and the pod is Guaranteed (BR-01).
+		d.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+		}
+	})
+
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), hardened)
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if n := len(patchActions(t, r)); n != 0 {
+		t.Errorf("issued %d patches for a target with no gaps, want 0", n)
+	}
+	got := storedHardening(t, r, w)
+	if len(got.Status.Plan) != 0 {
+		t.Errorf("status.plan = %+v, want no row: there is nothing to approve", got.Status.Plan)
+	}
+	if got.Status.Phase != v1alpha1.PhasePreviewed {
+		t.Errorf("phase = %q, want Previewed", got.Status.Phase)
+	}
+	// The findings still report what was seen: silence is how the lie that a
+	// namespace is hardened gets told (BR-04).
+	var defaulted bool
+	for _, f := range got.Status.Findings {
+		if strings.Contains(f.Reason, "defaulted from limit") {
+			defaulted = true
+		}
+	}
+	if !defaulted {
+		t.Errorf("findings = %+v, want the defaulted-from-limit observation reported", got.Status.Findings)
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }
+
+// Review Focus 6: a stored object whose spec will not convert into the typed
+// struct — a quantity the schema admits but resource.Quantity refuses, or an
+// object stored before the schema tightened. Returning the conversion error
+// requeues forever behind a blank status, which is indistinguishable from an
+// object the controller has never seen.
+func TestUnreadableSpecIsRejectedNotRetriedForever(t *testing.T) {
+	broken := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": v1alpha1.GroupName + "/" + v1alpha1.Version,
+		"kind":       v1alpha1.HardeningKind,
+		"metadata": map[string]any{
+			"name": "tenant-hardening", "namespace": "isolation-system", "uid": hardUID,
+		},
+		"spec": map[string]any{
+			"namespaces": []any{"tenant-a"},
+			// "10mm" has no valid quantity suffix: ParseQuantity refuses it,
+			// so Quantity.UnmarshalJSON fails and the whole spec will not
+			// convert.
+			"resources": map[string]any{"requests": map[string]any{"cpu": "10mm", "memory": "32Mi"}},
+		},
+	}}
+
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			v1alpha1.Resource:          v1alpha1.Kind + "List",
+			v1alpha1.HardeningResource: v1alpha1.HardeningKind + "List",
+		},
+		broken,
+	)
+
+	if err := r.Reconcile(context.Background(), "isolation-system/tenant-hardening"); err != nil {
+		t.Fatalf("Reconcile returned %v; an unreadable spec must be reported, not requeued forever", err)
+	}
+
+	u, err := r.Dyn.Resource(v1alpha1.HardeningResource).Namespace("isolation-system").
+		Get(context.Background(), "tenant-hardening", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the object back: %v", err)
+	}
+	status, _ := u.Object["status"].(map[string]any)
+	if status == nil {
+		t.Fatal("no status written; the object is indistinguishable from one never evaluated")
+	}
+	if status["phase"] != string(v1alpha1.PhaseRejected) {
+		t.Errorf("phase = %v, want Rejected", status["phase"])
+	}
+	message, _ := status["message"].(string)
+	if !strings.Contains(message, "spec cannot be read") {
+		t.Errorf("message = %q, want it to name the cause", message)
+	}
+
+	// Nothing was read from the cluster and nothing was written to it.
+	if n := len(r.Kube.(*fake.Clientset).Actions()); n != 0 {
+		t.Errorf("%d cluster calls made for an object that cannot be planned", n)
 	}
 }
