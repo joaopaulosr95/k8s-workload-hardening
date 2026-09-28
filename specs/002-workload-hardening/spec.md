@@ -262,6 +262,26 @@ Armed, each target is decided **on its own hash**:
 | changed since approval         | `Stale` — not patched, new hash published  |
 | target appeared after approval | `Unapproved` — not patched, hash published |
 
+**How `Stale` is told from `Unapproved`.** Both rows above are claims about the past, and
+`approvedPlan` is a flat list of hashes with no target attached, so neither is decidable from
+`spec` alone. They are resolved against the plan the controller last published in `status.plan`:
+a target for which an earlier pass published a hash that appears in `spec.approvedPlan`, and
+whose current hash differs from it, is `Stale`; every other target not approved now is
+`Unapproved`. Where no such record exists — a first armed pass carrying hashes copied from
+elsewhere, or a status that was cleared — the target reports `Unapproved`.
+
+That degradation is deliberate, and it is bounded to the label. The **phase** never depends on
+it: an approval that no longer describes anything is caught by FR-06's unmatched-hash rule,
+which compares `approvedPlan` against the current plan and needs no memory at all. A lost
+`status.plan` therefore costs an operator the word `Stale` on one row, never a request that goes
+terminal having done nothing. `Stale` is the *attribution* — which target your approval used to
+describe — and attribution is the only part that requires remembering.
+
+The two rules cannot disagree. A change hash is taken over a canonical form prefixed with the
+target's own namespace, kind and name, so distinct targets hash distinct inputs: a `Stale`
+target's previously approved hash no longer describes that target and can describe no other, so
+it is necessarily among the unmatched hashes that FR-06 already holds the object open for.
+
 Per target, not per plan, because a single plan-wide hash cannot converge in a live environment:
 any CI deploy touching any workload in any of up to 16 namespaces moves it, so the operator
 re-copies the hash and is stale again before the write lands. It also contradicts this
@@ -333,7 +353,9 @@ spec:
 `namespaces` holds 1–16 unique DNS labels. `resources.requests` is required and must name both
 `cpu` and `memory`, validated as quantities by the schema. There is no `resources.limits` field.
 `approvedPlan` holds up to 128 twelve-character hex hashes; a plan larger than that is approved
-in batches, which per-target semantics make safe. Namespace existence and LimitRange bounds are
+in batches against the same object, which per-target semantics make safe and which FR-05's
+generation gate is what permits — editing `approvedPlan` moves `metadata.generation`, so an
+`Applied` object picks the next batch up. Namespace existence and LimitRange bounds are
 checked by the controller and reported in status.
 
 Creating the object requests a **preview**. Copying the hashes of the changes the operator
@@ -348,10 +370,15 @@ There is no enable flag, and no undo in this version.
 
 ### FR-02 — The plan
 
-A pure function, `plan.Build(template, policy) → []Change`, with no client and no cluster state
-beyond the arguments it is given — the counterpart of `policy.Build` in 001. The same function
-feeds the dry-run, the real patch and the rendered status, so a preview cannot diverge from what
-is applied.
+A pure function, `plan.Build(template, policy) → Plan`, where `Plan` carries the `Change` list
+and the `Finding` list, with no client and no cluster state beyond the arguments it is given —
+the counterpart of `policy.Build` in 001. The same function feeds the dry-run, the real patch
+and the rendered status, so a preview cannot diverge from what is applied.
+
+Findings come back alongside changes because BR-04 requires them enumerated and both fall out of
+the same traversal: deciding that a container's effective request is defaulted from its limit is
+itself what produces the finding, so collecting them in a second pass would re-derive every
+effective value the first had already computed.
 
 Gaps are decided on **effective values** (BR-01), which means the function models Kubernetes'
 own defaulting: pod → container precedence for securityContext, limits → requests for resources,
@@ -386,6 +413,12 @@ The dry-run is side-effect-free only for webhooks declaring `sideEffects: None` 
 `NoneOnDryRun`; the API server refuses a dry-run that would reach one declaring otherwise, and
 that refusal is reported as the target's outcome rather than silently swallowed.
 
+A refusal during a **preview** does not requeue: the object stays `Previewed`, the target's row
+carries the refusal, and the periodic resync retries it. Returning an error would spin the
+queue's backoff against a webhook that may refuse permanently, on behalf of an object nobody
+armed. During an **apply** the same refusal is a `Failed` target and does return an error, so
+the queue retries it, per FR-04.
+
 What the dry-run does **not** cover is stated in Context and BR-02: root-related failures are
 kubelet- and kernel-enforced, and pass a dry-run cleanly.
 
@@ -415,13 +448,21 @@ no workload informer, no drift repair. The periodic resync recomputes the plan s
 preview does not silently rot, re-issuing dry-runs only for targets whose change has moved
 (FR-03).
 
-Per pass: read the object; if the phase is `Applied` do nothing; validate namespaces and
-LimitRange bounds; enumerate targets; build the plan; then preview or apply per BR-07. API calls
-carry timeouts.
+Per pass: read the object; if the phase is `Applied` and `status.observedGeneration` equals
+`metadata.generation`, do nothing; validate namespaces and LimitRange bounds; enumerate targets;
+build the plan; then preview or apply per BR-07. API calls carry timeouts.
 
-`Applied` is the only terminal phase. `Rejected` is **not** terminal — it is re-evaluated on
-every resync, so an object refused for a missing namespace or out-of-range LimitRange bounds
-recovers by itself once the cause clears, as in 001. A protected namespace is a permanent
+`Applied` is the only terminal phase, and it is terminal **until the approval changes**.
+`approvedPlan` is the only mutable field in `spec` (BR-07), so a `metadata.generation` ahead of
+`status.observedGeneration` is exactly an operator extending or correcting an approval — which
+is how BR-07's deliberately approved subset is extended, and how FR-01's batches reach a single
+object. Without that gate the only editable field on the object would be ignored the moment the
+first batch landed, and an approval that matched nothing could never be corrected. A resync does
+not move `generation`, so an untouched `Applied` object still issues no API calls at all (AC-14).
+
+`Rejected` is **not** terminal — it is re-evaluated on every resync, so an object refused for a
+missing namespace or out-of-range LimitRange bounds recovers by itself once the cause clears, as
+in 001. A protected namespace is a permanent
 condition and will be re-evaluated pointlessly forever; that is accepted, because a second
 terminality rule costs more than the wasted comparison.
 
@@ -434,15 +475,21 @@ no object is ever stuck waiting on this controller.
 
 ### FR-06 — Status
 
-| Phase              | Meaning                                                            |
-| ------------------ | ------------------------------------------------------------------ |
-| `Pending`          | Not yet evaluated                                                  |
-| `Rejected`         | A precondition failed; nothing was written                         |
-| `Previewed`        | A plan was computed and accepted by dry-run; nothing was written   |
-| `Applied`          | Every approved target was patched; none failed and none is `Stale` |
-| `PartiallyApplied` | At least one approved target failed or is `Stale`                  |
+| Phase              | Meaning                                                                                                               |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `Pending`          | Not yet evaluated                                                                                                     |
+| `Rejected`         | A precondition failed; nothing was written                                                                            |
+| `Previewed`        | A plan was computed and accepted by dry-run; nothing was written                                                      |
+| `Applied`          | Every hash in `spec.approvedPlan` matched a target, every approved target was patched, none failed and none is `Stale` |
+| `PartiallyApplied` | At least one approved target failed or is `Stale`, or at least one approved hash matched no target                    |
 
-Per-target outcome is one of `Patched`, `Failed`, `Stale`, `Unapproved`, or a finding reason.
+Per-target outcome is one of `Planned`, `Patched`, `Failed`, `Stale`, `Unapproved`, or a finding
+reason. `Planned` is the outcome of every row on an unarmed object: the target has gaps, its
+patch was accepted by the dry-run, and it is waiting to be approved. None of the other values
+describes that state — nothing was written, and `Stale` and `Unapproved` are both statements
+about an approval that an unarmed object does not have — so without it the most common row in
+the feature would carry an empty outcome, which reads as a fault rather than as a target
+awaiting the operator.
 
 `Unapproved` is **not** a failure. Approving a subset is the expected use of a per-target gate,
 so an object whose approved targets all patched is `Applied` however many targets it left alone;
@@ -451,9 +498,31 @@ of a different kind — the operator approved a change that no longer exists —
 object in `PartiallyApplied`, which is non-terminal and re-evaluated until the approval is
 updated.
 
+An approved hash that matches **no target at all** is neither of those, and both rows of the
+table would otherwise be silent about it: the phases are defined over approved *targets*, and
+`approvedPlan` is a list of *hashes*. Where every hash dangles, "every approved target was
+patched" is vacuously true over an empty set; where only some dangle, the matched ones patch and
+carry the object to `Applied` on their own. Either way `Applied` is terminal, so the approval
+would be stranded having done nothing. It therefore holds the object in `PartiallyApplied`, with
+the unmatched hashes named in the message. It arises from a copy-paste of a stale preview, a
+mistyped hash, or a target whose gaps someone else closed between preview and approval.
+
+Unlike `Stale`, recognising this needs no memory of what was previously published. `Stale` is a
+property of a target — its change moved since approval — so identifying one requires the plan
+published earlier, and degrades to `Unapproved` when that record is gone. An unmatched hash
+matches nothing *now*, whatever it matched before, so the phase never depends on status history
+even though a per-target label may.
+
+A row whose outcome is `Patched` is **retained across later passes**. An already-patched target
+has no gaps left (BR-01), so it drops out of the recomputed plan entirely, and an `Applied`
+object whose plan rendered empty would tell an operator nothing about what the tool did to their
+namespaces.
+
 Status carries the phase, a message naming the specific cause, the per-target plan or outcome
-with its current change hash, the pods affected, the findings with their reasons, and the last
-reconcile time. It is written only when something other than the timestamp changed, as in 001,
+with its current change hash, the pods affected, the findings with their reasons, the last
+reconcile time, and `observedGeneration` — the `metadata.generation` of the spec this status
+describes, which is what FR-05 compares to decide whether an `Applied` object has a new
+approval to act on. It is written only when something other than the timestamp changed, as in 001,
 so a resync of an unchanged object issues no writes at all.
 
 `Applied` means the API server accepted every approved patch. It does **not** assert that the
@@ -470,7 +539,9 @@ resulting pods became Ready — that is the rollout's business and the operator'
   provenance annotation in the same request.
 - **NFR-03 — Access.** The ClusterRole adds `deployments`, `statefulsets` and `daemonsets`
   get/list/patch cluster-wide — namespaces are chosen at runtime, so this cannot be
-  namespace-scoped; `pods`, `jobs`, `replicasets`, `limitranges` and `namespaces` get/list;
+  namespace-scoped; `pods`, `jobs`, `cronjobs`, `replicasets`, `limitranges` and `namespaces`
+  get/list — `cronjobs` because BR-04 requires findings enumerated whether or not they can be
+  acted on, and a CronJob between schedules owns no Job to be reported through;
   `workloadhardenings` plus its status. No `resourcequotas` (BR-06), no `delete` on any
   workload, no pod exec, no secrets. 001's lesson applies: `patch` is a distinct verb from
   `update`, and only an in-cluster run catches a missing one.
@@ -491,7 +562,7 @@ resulting pods became Ready — that is the rollout's business and the operator'
 | AC-02 | securityContext precedence: pod-level `runAsNonRoot: true` with a container-level `false` is a finding, not treated as hardened; a container-level `true` with nothing at pod level is left alone                                                                                                                                                                                                                     | Unit     |
 | AC-03 | **Effective requests:** a container with `limits` set and `requests` absent has **no** gap and yields the "defaulted from limit" finding; one with neither yields a gap; one with explicit requests is untouched                                                                                                                                                                                                      | Unit     |
 | AC-04 | `readOnlyRootFilesystem` appears in no patch unless requested, and in every eligible container when it is. No patch ever contains a `limits` key                                                                                                                                                                                                                                                                      | Unit     |
-| AC-05 | **Root evidence:** a privileged container, and an effective `runAsUser: 0`, each suppress pod-level `runAsNonRoot` for the whole pod and yield a finding; the other three fields are still written                                                                                                                                                                                                                    | Unit     |
+| AC-05 | **Root evidence:** a privileged container, and an effective `runAsUser: 0`, each suppress pod-level `runAsNonRoot` for the whole pod and yield a finding; the other three fields are still written **for the pod and its other containers**, while the privileged container itself receives none — the API server rejects `allowPrivilegeEscalation: false` beside `privileged: true`, which would fail the whole target's dry-run and take its siblings with it                                                                                                                                                                                                                    | Unit     |
 | AC-06 | **LimitRange:** a `defaultRequest` covering memory, **and a `default` with no `defaultRequest`**, each report the memory gap as covered and omit it from the patch; a `min`/`max` excluding the requested values rejects the namespace and writes nothing                                                                                                                                                             | Unit     |
 | AC-07 | A `paused` target, an `OnDelete` target and a StatefulSet with `partition > 0` are each refused with a distinct reason and never patched                                                                                                                                                                                                                                                                              | Unit     |
 | AC-08 | Preview writes nothing: every changed target's patch is issued with `DryRun`, stored objects are unchanged, and the per-target plan and hashes appear in status                                                                                                                                                                                                                                                       | Unit     |
@@ -503,6 +574,8 @@ resulting pods became Ready — that is the rollout's business and the operator'
 | AC-14 | An `Applied` object issues no API calls on resync, including one that reached `Applied` with targets left `Unapproved`; a `Rejected` one is re-evaluated and reaches `Previewed` once the cause clears                                                                                                                                                                                                                | Unit     |
 | AC-15 | On kind: a Deployment with no requests and a root container is previewed, approved by hash, applied, rolls out and stays Ready; a Deployment declaring **both** `cpu` and `memory` limits and no requests is **not** patched and keeps QoS `Guaranteed`; a namespace whose LimitRange sets only `default` reports its gaps as covered; a skip-annotated Deployment is untouched; the provenance annotation is correct | Script   |
 | AC-16 | The CRD installs and the API server rejects an empty namespace list, a missing `resources.requests`, a `resources.limits` key, and an edit to any field other than `approvedPlan`                                                                                                                                                                                                                                     | Script   |
+| AC-17 | **Unmatched approval:** a hash in `spec.approvedPlan` matching no target holds the object in `PartiallyApplied` and is named in the message — including when another approved target patched successfully in the same pass, which `Applied` would otherwise claim                                                                                                          | Unit     |
+| AC-18 | **Approval extended after `Applied`:** adding a hash to `spec.approvedPlan` on an `Applied` object is re-evaluated, patches the newly approved target, and does not re-patch one already patched; an `Applied` object whose generation has not moved still issues no API calls                                                                                              | Unit     |
 
 **AC-03 and AC-05 are the two most easily got wrong.**
 
@@ -534,6 +607,8 @@ DaemonSet that takes out a node's agent, and no dry-run refuses it.
 | The dry-run rejects a patch, or would reach a webhook declaring side effects | That target's outcome records the API server's message; other targets are unaffected                                                                                                                                                                                                                                                             |
 | A target's change moved since approval                                       | `Stale`; not patched; its new hash is published for re-approval; the object is `PartiallyApplied`                                                                                                                                                                                                                                                |
 | A target appeared after approval                                             | `Unapproved`; not patched; its hash is published; the phase is unaffected                                                                                                                                                                                                                                                                        |
+| A hash in `approvedPlan` matches no target                                   | `PartiallyApplied`, naming the unmatched hashes; non-terminal, so correcting the approval is acted on. Applies equally when other approved targets patched in the same pass (FR-06)                                                                                                                                                             |
+| `approvedPlan` is extended or corrected after `Applied`                      | `metadata.generation` moves, so the object is re-evaluated (FR-05). Newly approved targets are patched; targets already patched have no gaps left (BR-01), so they are not patched again                                                                                                                                                        |
 | A target vanishes between preview and apply                                  | Absent from the recomputed plan, so it is simply not patched                                                                                                                                                                                                                                                                                     |
 | A target is edited without changing its gaps                                 | Same hash, so it **is** patched. Stated in BR-07 rather than claimed otherwise                                                                                                                                                                                                                                                                   |
 | One approved patch fails during apply                                        | `PartiallyApplied`; successful patches kept; retried; recomputation means only the failures are retried                                                                                                                                                                                                                                          |
@@ -581,7 +656,7 @@ Real gaps, not present in this version. Ordered by what would be addressed first
 | G-02 | Watching the rollout to completion                                    | `Applied` means the API server accepted every approved patch. A halted rollout is visible in the workload but not in this object's status, so the tool's own report is not trustworthy end to end — and BR-02's per-kind table is exactly what an operator would want surfaced here.                                                        |
 | G-03 | Per-namespace exclusivity between objects                             | Two objects may target the same namespace, and the second one's provenance annotation replaces the first's (BR-08). 001 refuses this case per namespace; this feature does not.                                                                                                                                                             |
 | G-04 | Gating the configurations BR-02's table shows are worst               | A single-replica StatefulSet loses its only pod, and a DaemonSet whose container runs as root via the image's `USER` alone cannot be detected from the template and costs a node. Making pod-level `runAsNonRoot` opt-in for DaemonSets would close the second. Today BR-09 reports the mechanism and pod count and nothing refuses either. |
-| G-05 | Conditions, per-target conditions and `observedGeneration` in status  | Phase, message and the per-target plan are enough to operate the tool, but not enough to automate against it. Shared with 001's G-05.                                                                                                                                                                                                       |
+| G-05 | Conditions and per-target conditions in status                        | Phase, message and the per-target plan are enough to operate the tool, but not enough to automate against it. Shared with 001's G-05. `observedGeneration` is **no longer deferred**: FR-05 needs it to tell a new approval from a resync, so it is part of this version.                                                                    |
 | G-06 | The kind verification in CI, plus envtest for the CEL rule and schema | Runnable scripts cover AC-15 and AC-16; fake clients cannot exercise either, nor Kubernetes' own defaulting.                                                                                                                                                                                                                                |
 | G-07 | A metrics endpoint                                                    | Listed as a bonus. Shared with 001's G-07.                                                                                                                                                                                                                                                                                                  |
 | G-08 | Leader election                                                       | Shared with 001's G-01, but the exposure is smaller here: two writers would compute the same plan and issue the same gap-filling patches, so the second is a no-op.                                                                                                                                                                         |
