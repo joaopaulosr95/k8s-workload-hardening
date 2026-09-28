@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -98,8 +100,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 
 	// Nothing is written until cleanup is guaranteed a chance to run (FR-03).
 	if !slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
-		iso.Finalizers = append(iso.Finalizers, v1alpha1.Finalizer)
-		if err := r.update(ctx, iso); err != nil {
+		if err := r.patchFinalizers(ctx, iso, append(slices.Clone(iso.Finalizers), v1alpha1.Finalizer)); err != nil {
 			return err
 		}
 	}
@@ -183,15 +184,31 @@ func (r *Reconciler) setStatus(ctx context.Context, iso *v1alpha1.NetworkIsolati
 	return refresh(iso, out)
 }
 
-// update persists a metadata change — only ever the finalizer list — and
-// refreshes iso with the stored version, so the status write that follows in
-// the same pass is not a conflict.
-func (r *Reconciler) update(ctx context.Context, iso *v1alpha1.NetworkIsolation) error {
-	u, err := v1alpha1.ToUnstructured(iso)
+// patchFinalizers sets the finalizer list with a merge patch scoped to
+// metadata, and refreshes iso with the stored version so a status write later
+// in the same pass is not a conflict.
+//
+// It must not be a full-object update. That would round-trip spec through the
+// typed struct, and a field stored empty but tagged omitempty comes back
+// absent — matchExpressions: [] is the one the schema permits. The CRD's
+// immutability rule reads the difference as a retarget and rejects the write.
+// That is not a precondition failure, so no status is written and the object
+// wedges with a blank phase, no policies and no isolation at all.
+//
+// resourceVersion rides along so the write still fails on a conflict rather
+// than clobbering a concurrent change.
+func (r *Reconciler) patchFinalizers(ctx context.Context, iso *v1alpha1.NetworkIsolation, finalizers []string) error {
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"resourceVersion": iso.ResourceVersion,
+			"finalizers":      finalizers,
+		},
+	})
 	if err != nil {
 		return err
 	}
-	out, err := r.Dyn.Resource(v1alpha1.Resource).Namespace(iso.Namespace).Update(ctx, u, metav1.UpdateOptions{})
+	out, err := r.Dyn.Resource(v1alpha1.Resource).Namespace(iso.Namespace).
+		Patch(ctx, iso.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		return err
 	}
@@ -237,9 +254,9 @@ func (r *Reconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alp
 		}
 	}
 
-	iso.Finalizers = slices.DeleteFunc(iso.Finalizers, func(f string) bool { return f == v1alpha1.Finalizer })
 	logger.Info("Cleaned up", "policies", names)
-	return r.update(ctx, iso)
+	remaining := slices.DeleteFunc(slices.Clone(iso.Finalizers), func(f string) bool { return f == v1alpha1.Finalizer })
+	return r.patchFinalizers(ctx, iso, remaining)
 }
 
 // deletePolicy removes one policy if this operation owns it. An already absent

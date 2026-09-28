@@ -122,7 +122,7 @@ func TestFinalizerPrecedesPolicyWrites(t *testing.T) {
 	r.Dyn = dynClient(t, object)
 
 	finalizerPersisted := false
-	r.Dyn.(*dynamicfake.FakeDynamicClient).PrependReactor("update", "networkisolations", func(a k8stesting.Action) (bool, runtime.Object, error) {
+	r.Dyn.(*dynamicfake.FakeDynamicClient).PrependReactor("patch", "networkisolations", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() == "" {
 			finalizerPersisted = true
 		}
@@ -611,5 +611,74 @@ func TestRejectionError(t *testing.T) {
 	err := reject("namespace %q is protected", "kube-system")
 	if got, want := err.Error(), `namespace "kube-system" is protected`; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// The finalizer must be written with a patch scoped to metadata, never a
+// full-object update. A PUT round-trips spec through the typed struct, and a
+// field stored empty but tagged omitempty — matchExpressions: [] is the one
+// the schema permits — comes back absent. The CRD's immutability rule reads
+// that as a spec change and rejects the write, which is not a rejection, so
+// no status is ever written: the object wedges with a blank phase, no
+// policies, and an error blaming the operator for an edit they never made.
+func TestFinalizerIsPatchedNotPut(t *testing.T) {
+	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+	// Stored as an empty array, exactly as the schema's maxItems: 0 permits.
+	object.Spec.Peers[0].PodSelector.MatchExpressions = []metav1.LabelSelectorRequirement{}
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	var sawPatch bool
+	for _, a := range r.Dyn.(*dynamicfake.FakeDynamicClient).Actions() {
+		if a.GetSubresource() != "" {
+			continue // status writes are a separate concern
+		}
+		switch a.GetVerb() {
+		case "patch":
+			sawPatch = true
+			body := string(a.(k8stesting.PatchAction).GetPatch())
+			if strings.Contains(body, "\"spec\"") {
+				t.Errorf("finalizer patch carries spec, which can trip the immutability rule: %s", body)
+			}
+			if !strings.Contains(body, "finalizers") {
+				t.Errorf("finalizer patch does not mention finalizers: %s", body)
+			}
+		case "update":
+			t.Errorf("finalizer written with a full-object update; use a metadata patch")
+		}
+	}
+	if !sawPatch {
+		t.Error("no patch issued for the finalizer")
+	}
+
+	got := stored(t, r, object)
+	if got.Status.Phase != v1alpha1.PhaseActive {
+		t.Errorf("phase = %q (%s), want Active", got.Status.Phase, got.Status.Message)
+	}
+	if len(got.Finalizers) != 1 {
+		t.Errorf("finalizers = %v", got.Finalizers)
+	}
+}
+
+// The same applies to removing it during cleanup.
+func TestFinalizerRemovalIsPatchedNotPut(t *testing.T) {
+	object := deleting()
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	for _, a := range r.Dyn.(*dynamicfake.FakeDynamicClient).Actions() {
+		if a.GetSubresource() == "" && a.GetVerb() == "update" {
+			t.Error("finalizer removed with a full-object update; use a metadata patch")
+		}
+	}
+	if got := stored(t, r, object); len(got.Finalizers) != 0 {
+		t.Errorf("finalizers = %v, want empty", got.Finalizers)
 	}
 }

@@ -25,7 +25,9 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations"]
-    verbs: ["get", "list", "watch", "update"]
+    # patch, not just update: the finalizer is written with a merge patch
+    # scoped to metadata, so spec is never round-tripped back to the server.
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations/status"]
     verbs: ["get", "update", "patch"]
