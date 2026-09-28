@@ -16,14 +16,14 @@
 
 - **Module path:** `github.com/joaopaulosr95/k8s-workload-hardening`. Go 1.27.1.
 - **No new module dependencies.** `dynamic`, `dynamic/fake`, `dynamic/dynamicinformer`, `informers`, `kubernetes/fake` all live inside the already-required `k8s.io/client-go` module; they are absent from `vendor/` only because nothing imports them yet. **After adding any new k8s import, run `go mod vendor` and commit the vendor changes in the same commit.**
-- **API group/version/kind:** `hardening.acme.corp` / `v1alpha1` / `NetworkIsolation`, plural `networkisolations`, namespaced, status subresource.
-- **Finalizer:** exactly `hardening.acme.corp/cleanup`.
-- **Ownership label:** exactly `hardening.acme.corp/operation`, value = the object's UID.
-- **Owner annotation:** exactly `hardening.acme.corp/owner`, value = `<isolation namespace>/<isolation name>`.
-- **Policy names:** `netiso-<uid>-a` (protects group A) and `netiso-<uid>-b` (protects group B). Deterministic, no hashing.
+- **API group/version/kind:** `hardening.k8s.io` / `v1alpha1` / `NetworkIsolation`, plural `networkisolations`, namespaced, status subresource.
+- **Finalizer:** exactly `hardening.k8s.io/cleanup`.
+- **Ownership label:** exactly `hardening.k8s.io/operation`, value = the object's UID.
+- **Owner annotation:** exactly `hardening.k8s.io/owner`, value = `<isolation namespace>/<isolation name>`.
+- **Policy names:** `netiso-<uid>-0` and `netiso-<uid>-1`, index-aligned with `spec.peers`. Deterministic, no hashing; the index is stable because `spec` is immutable.
 - **Namespace label used in peers:** `kubernetes.io/metadata.name` (set automatically by the API server since v1.21).
 - **Protected namespaces (BR-05):** `kube-system`, `kube-public`, `kube-node-lease`, the controller's own namespace, plus anything passed on the `-protected-namespaces` flag.
-- **Never** delete, update or adopt a NetworkPolicy that does not carry this operation's UID in `hardening.acme.corp/operation` (BR-03, FR-03).
+- **Never** delete, update or adopt a NetworkPolicy that does not carry this operation's UID in `hardening.k8s.io/operation` (BR-03, FR-03).
 - **No egress rules, no `ipBlock`, no pod IP enumeration** in anything generated (FR-02).
 - **Coverage:** `go test ./pkg/... -cover` must reach ≥90% per package (NFR-05, AGENTS.md). `cmd/` is wiring and is excluded from that number.
 - **AGENTS.md role constraint:** do not edit `specs/001-network-isolation/spec.md`. If the implementation needs behaviour the spec does not describe, stop and raise it.
@@ -76,7 +76,7 @@ The repository currently holds the client-go sample pod-printer in `pkg/controll
 **Interfaces:**
 
 - Consumes: nothing.
-- Produces: `v1alpha1.NetworkIsolation`, `v1alpha1.Spec`, `v1alpha1.Group`, `v1alpha1.Status`, `v1alpha1.Phase` and its five constants, `v1alpha1.Resource` (a `schema.GroupVersionResource`), `v1alpha1.GroupVersionKind`, `v1alpha1.Finalizer`, `v1alpha1.OperationLabel`, `v1alpha1.OwnerAnnotation`, `v1alpha1.FromUnstructured(*unstructured.Unstructured) (*NetworkIsolation, error)`, `v1alpha1.ToUnstructured(*NetworkIsolation) (*unstructured.Unstructured, error)`.
+- Produces: `v1alpha1.NetworkIsolation`, `v1alpha1.Spec`, `v1alpha1.Group`, `v1alpha1.Status`, `v1alpha1.PeerStatus`, `v1alpha1.Phase` and its five constants, `v1alpha1.Resource` (a `schema.GroupVersionResource`), `v1alpha1.GroupVersionKind`, `v1alpha1.Finalizer`, `v1alpha1.OperationLabel`, `v1alpha1.OwnerAnnotation`, `v1alpha1.FromUnstructured(*unstructured.Unstructured) (*NetworkIsolation, error)`, `v1alpha1.ToUnstructured(*NetworkIsolation) (*unstructured.Unstructured, error)`.
 
 - [ ] **Step 1: Remove the sample-controller scaffold**
 
@@ -114,13 +114,15 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 			"deletionTimestamp": now.UTC().Format("2006-01-02T15:04:05Z"),
 		},
 		"spec": map[string]any{
-			"a": map[string]any{
-				"namespace":   "tenant-a",
-				"podSelector": map[string]any{"matchLabels": map[string]any{"app": "gateway"}},
-			},
-			"b": map[string]any{
-				"namespace":   "tenant-b",
-				"podSelector": map[string]any{"matchLabels": map[string]any{"app": "dashboard"}},
+			"peers": []any{
+				map[string]any{
+					"namespace":   "tenant-a",
+					"podSelector": map[string]any{"matchLabels": map[string]any{"app": "gateway"}},
+				},
+				map[string]any{
+					"namespace":   "tenant-b",
+					"podSelector": map[string]any{"matchLabels": map[string]any{"app": "dashboard"}},
+				},
 			},
 		},
 	}}
@@ -138,7 +140,10 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 	if iso.DeletionTimestamp == nil {
 		t.Error("DeletionTimestamp lost in conversion")
 	}
-	if iso.Spec.A.Namespace != "tenant-a" || iso.Spec.B.PodSelector.MatchLabels["app"] != "dashboard" {
+	if len(iso.Spec.Peers) != 2 {
+		t.Fatalf("got %d peers, want 2", len(iso.Spec.Peers))
+	}
+	if iso.Spec.Peers[0].Namespace != "tenant-a" || iso.Spec.Peers[1].PodSelector.MatchLabels["app"] != "dashboard" {
 		t.Errorf("Spec = %+v", iso.Spec)
 	}
 
@@ -157,7 +162,10 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 // Zero counts are part of the report, not an absence (FR-05), so they must not
 // be dropped by omitempty on the way out.
 func TestZeroCountsAreSerialised(t *testing.T) {
-	iso := &NetworkIsolation{Status: Status{Phase: PhaseActive, MatchedA: 0, MatchedB: 0}}
+	iso := &NetworkIsolation{Status: Status{
+		Phase: PhaseActive,
+		Peers: []PeerStatus{{Policy: "netiso-x-0", Matched: 0}, {Policy: "netiso-x-1", Matched: 0}},
+	}}
 	out, err := ToUnstructured(iso)
 	if err != nil {
 		t.Fatalf("ToUnstructured: %v", err)
@@ -166,11 +174,15 @@ func TestZeroCountsAreSerialised(t *testing.T) {
 	if !ok {
 		t.Fatal("status missing")
 	}
-	if _, ok := status["matchedA"]; !ok {
-		t.Error("matchedA dropped when zero")
+	peers, ok := status["peers"].([]any)
+	if !ok || len(peers) != 2 {
+		t.Fatalf("status.peers = %v", status["peers"])
 	}
-	if _, ok := status["matchedB"]; !ok {
-		t.Error("matchedB dropped when zero")
+	for i, raw := range peers {
+		peer := raw.(map[string]any)
+		if _, ok := peer["matched"]; !ok {
+			t.Errorf("peer %d: matched dropped when zero", i)
+		}
 	}
 }
 ```
@@ -198,19 +210,19 @@ import (
 )
 
 const (
-	GroupName = "hardening.acme.corp"
+	GroupName = "hardening.k8s.io"
 	Version   = "v1alpha1"
 	Kind      = "NetworkIsolation"
 
 	// Finalizer is persisted before the first policy write, so cleanup is
 	// guaranteed a chance to run (FR-03).
-	Finalizer = "hardening.acme.corp/cleanup"
+	Finalizer = "hardening.k8s.io/cleanup"
 	// OperationLabel carries the owning object's UID on every generated policy.
 	// Only policies bearing it are ever updated or deleted.
-	OperationLabel = "hardening.acme.corp/operation"
+	OperationLabel = "hardening.k8s.io/operation"
 	// OwnerAnnotation records "<namespace>/<name>" of the owning object, so a
 	// policy event can be mapped back to the object without a lookup table.
-	OwnerAnnotation = "hardening.acme.corp/owner"
+	OwnerAnnotation = "hardening.k8s.io/owner"
 )
 
 // Resource is the GVR the dynamic client uses for NetworkIsolation objects.
@@ -238,20 +250,28 @@ type Group struct {
 }
 
 // Spec is immutable once created, enforced by a CEL rule in the CRD (FR-01).
+// Peers always holds exactly two entries: the CRD pins the length, because one
+// pair needs no policy compiler and several pairs are separate objects (D-01).
+// The two are symmetric — the block is mutual, and their order carries no
+// meaning beyond indexing the generated policies.
 type Spec struct {
-	A Group `json:"a"`
-	B Group `json:"b"`
+	Peers []Group `json:"peers"`
 }
 
-// Status reports what the controller observed. MatchedA and MatchedB carry no
+// PeerStatus is what the controller observed about one peer. Matched carries no
 // omitempty: zero is an observation and is reported explicitly (FR-05).
+type PeerStatus struct {
+	Policy  string `json:"policy"`
+	Matched int    `json:"matched"`
+}
+
+// Status reports what the controller observed. Peers is index-aligned with
+// Spec.Peers.
 type Status struct {
-	Phase             Phase    `json:"phase,omitempty"`
-	Message           string   `json:"message,omitempty"`
-	Policies          []string `json:"policies,omitempty"`
-	MatchedA          int      `json:"matchedA"`
-	MatchedB          int      `json:"matchedB"`
-	LastReconcileTime string   `json:"lastReconcileTime,omitempty"`
+	Phase             Phase        `json:"phase,omitempty"`
+	Message           string       `json:"message,omitempty"`
+	Peers             []PeerStatus `json:"peers,omitempty"`
+	LastReconcileTime string       `json:"lastReconcileTime,omitempty"`
 }
 
 type NetworkIsolation struct {
@@ -311,7 +331,7 @@ The pure core of the feature, and the part the spec flags as easiest to get wron
 **Interfaces:**
 
 - Consumes: `v1alpha1.NetworkIsolation`, `v1alpha1.Group`, `v1alpha1.OperationLabel`, `v1alpha1.OwnerAnnotation`.
-- Produces: `policy.Names(uid string) (protectsA, protectsB string)`, `policy.Build(iso *v1alpha1.NetworkIsolation) []*networkingv1.NetworkPolicy` — a two-element slice, `[0]` protects group A and lives in A's namespace, `[1]` protects group B and lives in B's namespace.
+- Produces: `policy.Name(uid string, i int) string`, `policy.Names(uid string) []string`, `policy.Build(iso *v1alpha1.NetworkIsolation) []*networkingv1.NetworkPolicy` — a slice index-aligned with `spec.peers`: element `i` protects `peers[i]`, lives in its namespace, and excludes the other.
 
 - [ ] **Step 1: Write the failing shape test (AC-01)**
 
@@ -335,10 +355,10 @@ const testUID = "6f1b2c33-4d5e-6f70-8192-a3b4c5d6e7f8"
 func isolation(aNS string, aLabels map[string]string, bNS string, bLabels map[string]string) *v1alpha1.NetworkIsolation {
 	return &v1alpha1.NetworkIsolation{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw-dash", Namespace: "isolation-system", UID: testUID},
-		Spec: v1alpha1.Spec{
-			A: v1alpha1.Group{Namespace: aNS, PodSelector: metav1.LabelSelector{MatchLabels: aLabels}},
-			B: v1alpha1.Group{Namespace: bNS, PodSelector: metav1.LabelSelector{MatchLabels: bLabels}},
-		},
+		Spec: v1alpha1.Spec{Peers: []v1alpha1.Group{
+			{Namespace: aNS, PodSelector: metav1.LabelSelector{MatchLabels: aLabels}},
+			{Namespace: bNS, PodSelector: metav1.LabelSelector{MatchLabels: bLabels}},
+		}},
 	}
 }
 
@@ -353,15 +373,15 @@ func TestBuildShape(t *testing.T) {
 		t.Fatalf("got %d policies, want 2", len(got))
 	}
 
-	nameA, nameB := Names(testUID)
+	names := Names(testUID)
 	cases := []struct {
 		p        *networkingv1.NetworkPolicy
 		name, ns string
 		selector map[string]string
 		peers    int
 	}{
-		{got[0], nameA, "tenant-a", map[string]string{"app": "gateway"}, 3},   // 1 + len(B labels)
-		{got[1], nameB, "tenant-b", map[string]string{"app": "dashboard", "tier": "web"}, 2}, // 1 + len(A labels)
+		{got[0], names[0], "tenant-a", map[string]string{"app": "gateway"}, 3},                  // 1 + len(peers[1] labels)
+		{got[1], names[1], "tenant-b", map[string]string{"app": "dashboard", "tier": "web"}, 2}, // 1 + len(peers[0] labels)
 	}
 	for _, c := range cases {
 		if c.p.Name != c.name || c.p.Namespace != c.ns {
@@ -421,6 +441,7 @@ package policy
 import (
 	"maps"
 	"slices"
+	"strconv"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -433,24 +454,31 @@ import (
 // having to label it.
 const namespaceNameLabel = "kubernetes.io/metadata.name"
 
-// Names returns the deterministic policy names for an operation: the policy
-// protecting group A, then the one protecting group B (FR-03). A UID is 36
-// characters of lowercase hex and hyphens, so the result is always a valid
-// DNS-1123 subdomain and needs no hashing or truncation.
-func Names(uid string) (string, string) {
-	return "netiso-" + uid + "-a", "netiso-" + uid + "-b"
+// Name returns the deterministic name of the policy protecting peer i (FR-03).
+// A UID is 36 characters of lowercase hex and hyphens, so the result is always
+// a valid DNS-1123 subdomain and needs no hashing or truncation. The index is
+// stable because the spec is immutable.
+func Name(uid string, i int) string {
+	return "netiso-" + uid + "-" + strconv.Itoa(i)
 }
 
-// Build returns the two policies for iso: element 0 protects group A and lives
-// in A's namespace, element 1 protects group B and lives in B's.
+// Names returns the policy names for an operation, index-aligned with
+// spec.peers.
+func Names(uid string) []string {
+	return []string{Name(uid, 0), Name(uid, 1)}
+}
+
+// Build returns the two policies for iso, index-aligned with spec.peers:
+// element i protects peers[i], lives in its namespace, and excludes the other.
 func Build(iso *v1alpha1.NetworkIsolation) []*networkingv1.NetworkPolicy {
 	uid := string(iso.UID)
 	owner := iso.Namespace + "/" + iso.Name
-	nameA, nameB := Names(uid)
-	return []*networkingv1.NetworkPolicy{
-		build(nameA, uid, owner, iso.Spec.A, iso.Spec.B),
-		build(nameB, uid, owner, iso.Spec.B, iso.Spec.A),
+	out := make([]*networkingv1.NetworkPolicy, len(iso.Spec.Peers))
+	for i, self := range iso.Spec.Peers {
+		other := iso.Spec.Peers[len(iso.Spec.Peers)-1-i]
+		out[i] = build(Name(uid, i), uid, owner, self, other)
 	}
+	return out
 }
 
 // build produces the ingress-only policy that protects self by allowing every
@@ -735,12 +763,12 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
-        - name: Matched-A
+        - name: Peer-0
           type: integer
-          jsonPath: .status.matchedA
-        - name: Matched-B
+          jsonPath: .status.peers[0].matched
+        - name: Peer-1
           type: integer
-          jsonPath: .status.matchedB
+          jsonPath: .status.peers[1].matched
         - name: Message
           type: string
           jsonPath: .status.message
@@ -758,54 +786,61 @@ spec:
           properties:
             spec:
               type: object
-              required: [a, b]
+              required: [peers]
               x-kubernetes-validations:
                 - rule: self == oldSelf
                   message: >-
                     spec is immutable; delete this object, wait for cleanup,
                     and create a new one to retarget
               properties:
-                a: &group
-                  type: object
-                  required: [namespace, podSelector]
-                  properties:
-                    namespace:
-                      type: string
-                      maxLength: 63
-                      pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
-                    podSelector:
-                      type: object
-                      required: [matchLabels]
-                      properties:
-                        matchLabels:
-                          type: object
-                          description: 1-8 equality requirements. All must match.
-                          minProperties: 1
-                          maxProperties: 8
-                          additionalProperties:
-                            type: string
-                            maxLength: 63
-                            pattern: "^(|[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$"
-                          x-kubernetes-validations:
-                            - rule: >-
-                                self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$'))
-                              message: every key must be a valid Kubernetes label key
-                        matchExpressions:
-                          type: array
-                          description: >-
-                            Not supported. The controller generates the
-                            negations itself; operators supply equality maps
-                            only.
-                          maxItems: 0
-                          items:
+                peers:
+                  type: array
+                  description: >-
+                    Exactly two pod groups. They are symmetric: traffic is
+                    blocked between them in both directions, and their order
+                    carries no meaning beyond indexing the generated policies.
+                  minItems: 2
+                  maxItems: 2
+                  items:
+                    type: object
+                    required: [namespace, podSelector]
+                    properties:
+                      namespace:
+                        type: string
+                        maxLength: 63
+                        pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                      podSelector:
+                        type: object
+                        required: [matchLabels]
+                        properties:
+                          matchLabels:
                             type: object
-                            properties:
-                              key: { type: string }
-                              operator: { type: string }
-                              values:
-                                type: array
-                                items: { type: string }
-                b: *group
+                            description: 1-8 equality requirements. All must match.
+                            minProperties: 1
+                            maxProperties: 8
+                            additionalProperties:
+                              type: string
+                              maxLength: 63
+                              pattern: "^(|[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$"
+                            x-kubernetes-validations:
+                              - rule: >-
+                                  self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$'))
+                                message: every key must be a valid Kubernetes label key
+                          matchExpressions:
+                            type: array
+                            description: >-
+                              Not supported. The controller generates the
+                              negations itself; operators supply equality maps
+                              only.
+                            maxItems: 0
+                            items:
+                              type: object
+                              properties:
+                                key: { type: string }
+                                operator: { type: string }
+                                values:
+                                  type: array
+                                  items: { type: string }
             status:
               type: object
               properties:
@@ -814,13 +849,14 @@ spec:
                   enum: [Pending, Rejected, Active, Degraded, Deleting]
                 message:
                   type: string
-                policies:
+                peers:
                   type: array
-                  items: { type: string }
-                matchedA:
-                  type: integer
-                matchedB:
-                  type: integer
+                  description: Index-aligned with spec.peers.
+                  items:
+                    type: object
+                    properties:
+                      policy: { type: string }
+                      matched: { type: integer }
                 lastReconcileTime:
                   type: string
                   format: date-time
@@ -834,7 +870,7 @@ kubectl apply -f deploy/crd.yaml
 kubectl get crd networkisolations.hardening.acme.corp
 ```
 
-Expected: `customresourcedefinition.apiextensions.k8s.io/networkisolations.hardening.acme.corp created`, then the CRD listed. A schema error appears here, not later.
+Expected: `customresourcedefinition.apiextensions.k8s.io/networkisolations.hardening.k8s.io created`, then the CRD listed. A schema error appears here, not later.
 
 - [ ] **Step 3: Write the validation script**
 
@@ -867,7 +903,7 @@ kubectl apply -f deploy/crd.yaml >/dev/null
 kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 expect_reject "object missing group b" <<EOF
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata: {name: missing-b, namespace: $ns}
 spec:
@@ -875,7 +911,7 @@ spec:
 EOF
 
 expect_reject "matchExpressions supplied" <<EOF
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata: {name: with-expressions, namespace: $ns}
 spec:
@@ -888,7 +924,7 @@ spec:
 EOF
 
 expect_reject "empty matchLabels" <<EOF
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata: {name: empty-labels, namespace: $ns}
 spec:
@@ -897,7 +933,7 @@ spec:
 EOF
 
 expect_reject "invalid namespace name" <<EOF
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata: {name: bad-namespace, namespace: $ns}
 spec:
@@ -907,7 +943,7 @@ EOF
 
 # A prefixed label key is legal and must be accepted (Review Focus 4).
 cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
@@ -917,7 +953,7 @@ EOF
 echo "ok    accepted: valid object with a prefixed label key"
 
 expect_reject "edit to an immutable spec" <<EOF
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
@@ -927,7 +963,7 @@ EOF
 
 # Re-applying the identical spec must still be allowed: self == oldSelf holds.
 cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
@@ -1001,7 +1037,7 @@ Everything that can refuse an operation before a single byte is written. The for
   - `type Reconciler struct { Kube kubernetes.Interface; Dyn dynamic.Interface; Protected map[string]bool; Timeout time.Duration; Now func() time.Time }`
   - `type rejection struct{ reason string }` with `Error() string` — a precondition failure, distinct from an API error
   - `func reject(format string, args ...any) error`
-  - `type counts struct{ a, b int }`
+  - `type counts []int` — matched pod count per peer, index-aligned with `spec.peers`
   - `func (r *Reconciler) validate(ctx context.Context, iso *v1alpha1.NetworkIsolation) (counts, error)`
   - `func disjoint(a, b map[string]string) bool`
   - `func affectsIngress(p *networkingv1.NetworkPolicy) bool`
@@ -1056,10 +1092,10 @@ func netpol(namespace, name string, policyTypes []networkingv1.PolicyType, label
 func iso(aNS string, aLabels map[string]string, bNS string, bLabels map[string]string) *v1alpha1.NetworkIsolation {
 	return &v1alpha1.NetworkIsolation{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw-dash", Namespace: "isolation-system", UID: uid},
-		Spec: v1alpha1.Spec{
-			A: v1alpha1.Group{Namespace: aNS, PodSelector: metav1.LabelSelector{MatchLabels: aLabels}},
-			B: v1alpha1.Group{Namespace: bNS, PodSelector: metav1.LabelSelector{MatchLabels: bLabels}},
-		},
+		Spec: v1alpha1.Spec{Peers: []v1alpha1.Group{
+			{Namespace: aNS, PodSelector: metav1.LabelSelector{MatchLabels: aLabels}},
+			{Namespace: bNS, PodSelector: metav1.LabelSelector{MatchLabels: bLabels}},
+		}},
 	}
 }
 
@@ -1210,11 +1246,14 @@ func TestValidateCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if c.a != 2 {
-		t.Errorf("counts.a = %d, want 2", c.a)
+	if len(c) != 2 {
+		t.Fatalf("got %d counts, want 2", len(c))
 	}
-	if c.b != 0 {
-		t.Errorf("counts.b = %d, want 0", c.b)
+	if c[0] != 2 {
+		t.Errorf("counts[0] = %d, want 2", c[0])
+	}
+	if c[1] != 0 {
+		t.Errorf("counts[1] = %d, want 0", c[1])
 	}
 }
 
@@ -1299,56 +1338,60 @@ func reject(format string, args ...any) error {
 	return &rejection{reason: fmt.Sprintf(format, args...)}
 }
 
-// counts is how many pods each group currently matches.
-type counts struct{ a, b int }
+// counts is how many pods each peer currently matches, index-aligned with
+// spec.peers.
+type counts []int
 
 // validate checks every precondition in BR-03, BR-04 and BR-05 before anything
-// is written, and returns the matched pod count per group.
+// is written, and returns the matched pod count per peer.
 func (r *Reconciler) validate(ctx context.Context, iso *v1alpha1.NetworkIsolation) (counts, error) {
-	groups := [2]v1alpha1.Group{iso.Spec.A, iso.Spec.B}
+	peers := iso.Spec.Peers
+
+	// The CRD pins this, but an object stored before the constraint tightened,
+	// or one that reached etcd another way, must not reach the policy builder.
+	if len(peers) != 2 {
+		return nil, reject("spec.peers holds %d entries; exactly two are required", len(peers))
+	}
 
 	// BR-05, checked before any API call: never target a protected namespace.
-	for _, g := range groups {
+	for _, g := range peers {
 		if r.Protected[g.Namespace] {
-			return counts{}, reject("namespace %q is protected and may not be targeted", g.Namespace)
+			return nil, reject("namespace %q is protected and may not be targeted", g.Namespace)
 		}
 	}
 
-	// BR-04: two groups in one namespace must be provably disjoint, or one
-	// policy's complement would block the other group's own pods.
-	if iso.Spec.A.Namespace == iso.Spec.B.Namespace && !disjoint(iso.Spec.A.PodSelector.MatchLabels, iso.Spec.B.PodSelector.MatchLabels) {
-		return counts{}, reject(
-			"both groups target namespace %q but their selectors are not provably disjoint: no label key is held by both with different values",
-			iso.Spec.A.Namespace)
+	// BR-04: two peers in one namespace must be provably disjoint, or one
+	// policy's complement would block the other peer's own pods.
+	if peers[0].Namespace == peers[1].Namespace &&
+		!disjoint(peers[0].PodSelector.MatchLabels, peers[1].PodSelector.MatchLabels) {
+		return nil, reject(
+			"both peers target namespace %q but their selectors are not provably disjoint: no label key is held by both with different values",
+			peers[0].Namespace)
 	}
 
-	var out counts
+	out := make(counts, len(peers))
 	checked := map[string]bool{}
-	for i, g := range groups {
+	for i, g := range peers {
 		if _, err := r.Kube.CoreV1().Namespaces().Get(ctx, g.Namespace, metav1.GetOptions{}); err != nil {
 			if apierrors.IsNotFound(err) {
-				return counts{}, reject("namespace %q does not exist", g.Namespace)
+				return nil, reject("namespace %q does not exist", g.Namespace)
 			}
-			return counts{}, err
+			return nil, err
 		}
 
 		n, err := r.countPods(ctx, g)
 		if err != nil {
-			return counts{}, err
+			return nil, err
 		}
-		if i == 0 {
-			out.a = n
-		} else {
-			out.b = n
-		}
+		out[i] = n
 
-		// One namespace, one foreign-policy scan, even when both groups share it.
+		// One namespace, one foreign-policy scan, even when both peers share it.
 		if checked[g.Namespace] {
 			continue
 		}
 		checked[g.Namespace] = true
 		if err := r.checkForeignPolicies(ctx, g.Namespace, string(iso.UID)); err != nil {
-			return counts{}, err
+			return nil, err
 		}
 	}
 	return out, nil
@@ -1551,8 +1594,8 @@ func TestActivate(t *testing.T) {
 	if got.Status.Phase != v1alpha1.PhaseActive {
 		t.Errorf("phase = %q (%s), want Active", got.Status.Phase, got.Status.Message)
 	}
-	if got.Status.MatchedA != 1 || got.Status.MatchedB != 0 {
-		t.Errorf("counts = (%d, %d), want (1, 0)", got.Status.MatchedA, got.Status.MatchedB)
+	if len(got.Status.Peers) != 2 {
+		t.Fatalf("status.peers = %v, want 2 entries", got.Status.Peers)
 	}
 	if got.Status.LastReconcileTime == "" {
 		t.Error("lastReconcileTime not set")
@@ -1561,11 +1604,13 @@ func TestActivate(t *testing.T) {
 		t.Errorf("finalizers = %v", got.Finalizers)
 	}
 
-	nameA, nameB := policy.Names(uid)
-	if len(got.Status.Policies) != 2 || got.Status.Policies[0] != nameA || got.Status.Policies[1] != nameB {
-		t.Errorf("status.policies = %v, want [%s %s]", got.Status.Policies, nameA, nameB)
+	names := policy.Names(uid)
+	for i, want := range []v1alpha1.PeerStatus{{Policy: names[0], Matched: 1}, {Policy: names[1], Matched: 0}} {
+		if got.Status.Peers[i] != want {
+			t.Errorf("status.peers[%d] = %+v, want %+v", i, got.Status.Peers[i], want)
+		}
 	}
-	for _, p := range []struct{ ns, name string }{{"tenant-a", nameA}, {"tenant-b", nameB}} {
+	for _, p := range []struct{ ns, name string }{{"tenant-a", names[0]}, {"tenant-b", names[1]}} {
 		np, err := r.Kube.NetworkingV1().NetworkPolicies(p.ns).Get(context.Background(), p.name, metav1.GetOptions{})
 		if err != nil {
 			t.Fatalf("policy %s/%s: %v", p.ns, p.name, err)
@@ -1702,9 +1747,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 		if err := r.setStatus(ctx, iso, v1alpha1.Status{
 			Phase:    phase,
 			Message:  rej.reason,
-			Policies: iso.Status.Policies,
-			MatchedA: iso.Status.MatchedA,
-			MatchedB: iso.Status.MatchedB,
+			Peers: iso.Status.Peers,
 		}); err != nil {
 			return err
 		}
@@ -1726,10 +1769,10 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 	}
 
 	desired := policy.Build(iso)
-	names := make([]string, 0, len(desired))
+	peers := make([]v1alpha1.PeerStatus, len(desired))
 	var failures []string
-	for _, want := range desired {
-		names = append(names, want.Name)
+	for i, want := range desired {
+		peers[i] = v1alpha1.PeerStatus{Policy: want.Name, Matched: c[i]}
 		if err := r.applyPolicy(ctx, want, string(iso.UID)); err != nil {
 			// Whatever succeeded stays: rolling back would reopen traffic
 			// this operation was asked to block (FR-04).
@@ -1738,7 +1781,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 		}
 	}
 
-	status := v1alpha1.Status{Phase: v1alpha1.PhaseActive, Policies: names, MatchedA: c.a, MatchedB: c.b}
+	status := v1alpha1.Status{Phase: v1alpha1.PhaseActive, Peers: peers}
 	if len(failures) > 0 {
 		status.Phase = v1alpha1.PhaseDegraded
 		status.Message = strings.Join(failures, "; ")
@@ -1750,7 +1793,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 		// Returned so the queue retries; the status already says why.
 		return fmt.Errorf("%d of %d policies not written", len(failures), len(desired))
 	}
-	logger.Info("Active", "policies", names, "matchedA", c.a, "matchedB", c.b)
+	logger.Info("Active", "peers", peers)
 	return nil
 }
 
@@ -1864,8 +1907,10 @@ func TestReconcileIsIdempotent(t *testing.T) {
 	}
 
 	// Zero-match selectors stay Active with counts of zero (AC-06).
-	if got := stored(t, r, object); got.Status.MatchedA != 0 || got.Status.MatchedB != 0 {
-		t.Errorf("counts = (%d, %d), want (0, 0)", got.Status.MatchedA, got.Status.MatchedB)
+	for i, p := range got.Status.Peers {
+		if p.Matched != 0 {
+			t.Errorf("status.peers[%d].matched = %d, want 0", i, p.Matched)
+		}
 	}
 
 	r.Kube.(*fake.Clientset).ClearActions()
@@ -1903,13 +1948,13 @@ func TestPartialWriteDegradesAndConverges(t *testing.T) {
 	r := newReconciler(ns("tenant-a"), ns("tenant-b"))
 	r.Dyn = dynClient(t, object)
 
-	nameA, nameB := policy.Names(uid)
+	names := policy.Names(uid)
 
 	failing := true
 	r.Kube.(*fake.Clientset).PrependReactor("create", "networkpolicies", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		create := a.(k8stesting.CreateAction)
 		np := create.GetObject().(*networkingv1.NetworkPolicy)
-		if failing && np.Name == nameB {
+		if failing && np.Name == names[1] {
 			return true, nil, apierrors.NewInternalError(errors.New("etcd is unhappy"))
 		}
 		return false, nil, nil
@@ -1924,10 +1969,10 @@ func TestPartialWriteDegradesAndConverges(t *testing.T) {
 	if got.Status.Phase != v1alpha1.PhaseDegraded {
 		t.Errorf("phase = %q, want Degraded", got.Status.Phase)
 	}
-	if !strings.Contains(got.Status.Message, nameB) {
+	if !strings.Contains(got.Status.Message, names[1]) {
 		t.Errorf("message = %q, want it to name the failed policy", got.Status.Message)
 	}
-	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), nameA, metav1.GetOptions{}); err != nil {
+	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), names[0], metav1.GetOptions{}); err != nil {
 		t.Errorf("the successful policy was not kept: %v", err)
 	}
 
@@ -1940,7 +1985,7 @@ func TestPartialWriteDegradesAndConverges(t *testing.T) {
 	if got.Status.Phase != v1alpha1.PhaseActive {
 		t.Errorf("phase after retry = %q (%s), want Active", got.Status.Phase, got.Status.Message)
 	}
-	for _, p := range []struct{ ns, name string }{{"tenant-a", nameA}, {"tenant-b", nameB}} {
+	for _, p := range []struct{ ns, name string }{{"tenant-a", names[0]}, {"tenant-b", names[1]}} {
 		if _, err := r.Kube.NetworkingV1().NetworkPolicies(p.ns).Get(context.Background(), p.name, metav1.GetOptions{}); err != nil {
 			t.Errorf("policy %s/%s missing after convergence: %v", p.ns, p.name, err)
 		}
@@ -1974,7 +2019,7 @@ func TestForeignPolicyAfterActivationDegrades(t *testing.T) {
 	if err := r.Reconcile(context.Background(), key(object)); err != nil {
 		t.Fatalf("activation: %v", err)
 	}
-	nameA, nameB := policy.Names(uid)
+	names := policy.Names(uid)
 
 	foreign := netpol("tenant-b", "legacy", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, nil)
 	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-b").Create(context.Background(), foreign, metav1.CreateOptions{}); err != nil {
@@ -1991,10 +2036,10 @@ func TestForeignPolicyAfterActivationDegrades(t *testing.T) {
 	if !strings.Contains(got.Status.Message, "legacy") {
 		t.Errorf("message = %q, want it to name the foreign policy", got.Status.Message)
 	}
-	if len(got.Status.Policies) != 2 {
-		t.Errorf("status.policies = %v, want the owned policies still reported", got.Status.Policies)
+	if len(got.Status.Peers) != 2 {
+		t.Errorf("status.peers = %v, want the owned policies still reported", got.Status.Peers)
 	}
-	for _, p := range []struct{ ns, name string }{{"tenant-a", nameA}, {"tenant-b", nameB}} {
+	for _, p := range []struct{ ns, name string }{{"tenant-a", names[0]}, {"tenant-b", names[1]}} {
 		if _, err := r.Kube.NetworkingV1().NetworkPolicies(p.ns).Get(context.Background(), p.name, metav1.GetOptions{}); err != nil {
 			t.Errorf("owned policy %s/%s was removed: %v", p.ns, p.name, err)
 		}
@@ -2167,8 +2212,10 @@ func deleting() *v1alpha1.NetworkIsolation {
 	now := metav1.Now()
 	object.DeletionTimestamp = &now
 	object.Finalizers = []string{v1alpha1.Finalizer}
-	nameA, nameB := policy.Names(uid)
-	object.Status = v1alpha1.Status{Phase: v1alpha1.PhaseActive, Policies: []string{nameA, nameB}}
+	names := policy.Names(uid)
+	object.Status = v1alpha1.Status{Phase: v1alpha1.PhaseActive, Peers: []v1alpha1.PeerStatus{
+		{Policy: names[0], Matched: 1}, {Policy: names[1], Matched: 1},
+	}}
 	return object
 }
 
@@ -2180,15 +2227,15 @@ func ownedPolicy(namespace, name string) *networkingv1.NetworkPolicy {
 // AC-04: both policies go, then the finalizer.
 func TestCleanupRemovesPoliciesThenFinalizer(t *testing.T) {
 	object := deleting()
-	nameA, nameB := policy.Names(uid)
-	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", nameA), ownedPolicy("tenant-b", nameB))
+	names := policy.Names(uid)
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", names[0]), ownedPolicy("tenant-b", names[1]))
 	r.Dyn = dynClient(t, object)
 
 	if err := r.Reconcile(context.Background(), key(object)); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	for _, p := range []struct{ ns, name string }{{"tenant-a", nameA}, {"tenant-b", nameB}} {
+	for _, p := range []struct{ ns, name string }{{"tenant-a", names[0]}, {"tenant-b", names[1]}} {
 		if _, err := r.Kube.NetworkingV1().NetworkPolicies(p.ns).Get(context.Background(), p.name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 			t.Errorf("policy %s/%s still present (err %v)", p.ns, p.name, err)
 		}
@@ -2215,12 +2262,12 @@ func TestCleanupToleratesAbsentPolicies(t *testing.T) {
 // AC-04: an API error is not evidence of absence. The finalizer stays.
 func TestCleanupKeepsFinalizerOnAPIError(t *testing.T) {
 	object := deleting()
-	nameA, nameB := policy.Names(uid)
-	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", nameA), ownedPolicy("tenant-b", nameB))
+	names := policy.Names(uid)
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", names[0]), ownedPolicy("tenant-b", names[1]))
 	r.Dyn = dynClient(t, object)
 
 	r.Kube.(*fake.Clientset).PrependReactor("delete", "networkpolicies", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		if a.(k8stesting.DeleteAction).GetName() == nameB {
+		if a.(k8stesting.DeleteAction).GetName() == names[1] {
 			return true, nil, apierrors.NewInternalError(errors.New("apiserver unreachable"))
 		}
 		return false, nil, nil
@@ -2239,9 +2286,9 @@ func TestCleanupKeepsFinalizerOnAPIError(t *testing.T) {
 // would say.
 func TestCleanupNeverRecreates(t *testing.T) {
 	object := deleting()
-	nameA, nameB := policy.Names(uid)
+	names := policy.Names(uid)
 	// Only one policy survived the crash; the other was already removed.
-	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", nameA))
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), ownedPolicy("tenant-a", names[0]))
 	r.Dyn = dynClient(t, object)
 
 	if err := r.Reconcile(context.Background(), key(object)); err != nil {
@@ -2252,11 +2299,11 @@ func TestCleanupNeverRecreates(t *testing.T) {
 			t.Errorf("deletion pass wrote a policy: %s", a.GetVerb())
 		}
 	}
-	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), nameA, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Errorf("surviving policy %s not removed", nameA)
+	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), names[0], metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("surviving policy %s not removed", names[0])
 	}
-	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-b").Get(context.Background(), nameB, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Errorf("policy %s reappeared", nameB)
+	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-b").Get(context.Background(), names[1], metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("policy %s reappeared", names[1])
 	}
 }
 
@@ -2264,8 +2311,8 @@ func TestCleanupNeverRecreates(t *testing.T) {
 // even during cleanup (FR-03).
 func TestCleanupLeavesForeignPolicyAlone(t *testing.T) {
 	object := deleting()
-	nameA, _ := policy.Names(uid)
-	foreign := netpol("tenant-a", nameA, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+	names[0], _ := policy.Names(uid)
+	foreign := netpol("tenant-a", names[0], []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 		map[string]string{v1alpha1.OperationLabel: "some-other-uid"})
 	r := newReconciler(ns("tenant-a"), ns("tenant-b"), foreign)
 	r.Dyn = dynClient(t, object)
@@ -2273,7 +2320,7 @@ func TestCleanupLeavesForeignPolicyAlone(t *testing.T) {
 	if err := r.Reconcile(context.Background(), key(object)); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), nameA, metav1.GetOptions{}); err != nil {
+	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), names[0], metav1.GetOptions{}); err != nil {
 		t.Errorf("foreign policy was deleted: %v", err)
 	}
 }
@@ -2301,17 +2348,15 @@ func (r *Reconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alp
 
 	if err := r.setStatus(ctx, iso, v1alpha1.Status{
 		Phase:    v1alpha1.PhaseDeleting,
-		Policies: iso.Status.Policies,
-		MatchedA: iso.Status.MatchedA,
-		MatchedB: iso.Status.MatchedB,
+		Peers: iso.Status.Peers,
 	}); err != nil {
 		return err
 	}
 
-	nameA, nameB := policy.Names(string(iso.UID))
+	names[0], names[1] := policy.Names(string(iso.UID))
 	targets := []struct{ namespace, name string }{
-		{iso.Spec.A.Namespace, nameA},
-		{iso.Spec.B.Namespace, nameB},
+		{iso.Spec.Peers[0].Namespace, names[0]},
+		{iso.Spec.Peers[1].Namespace, names[1]},
 	}
 	for _, t := range targets {
 		if err := r.deletePolicy(ctx, t.namespace, t.name, string(iso.UID)); err != nil {
@@ -2323,7 +2368,7 @@ func (r *Reconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alp
 	}
 
 	iso.Finalizers = slices.DeleteFunc(iso.Finalizers, func(f string) bool { return f == v1alpha1.Finalizer })
-	logger.Info("Cleaned up", "policies", []string{nameA, nameB})
+	logger.Info("Cleaned up", "policies", []string{names[0], names[1]})
 	return r.update(ctx, iso)
 }
 
@@ -2830,13 +2875,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "namespaces"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["hardening.acme.corp"]
+  - apiGroups: ["hardening.k8s.io"]
     resources: ["networkisolations"]
     verbs: ["get", "list", "watch", "update"]
-  - apiGroups: ["hardening.acme.corp"]
+  - apiGroups: ["hardening.k8s.io"]
     resources: ["networkisolations/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["hardening.acme.corp"]
+  - apiGroups: ["hardening.k8s.io"]
     resources: ["networkisolations/finalizers"]
     verbs: ["update"]
 ---
@@ -3000,7 +3045,7 @@ spec:
 Create `deploy/samples/isolation.yaml`:
 
 ```yaml
-apiVersion: hardening.acme.corp/v1alpha1
+apiVersion: hardening.k8s.io/v1alpha1
 kind: NetworkIsolation
 metadata:
   name: gateway-dashboard
@@ -3078,7 +3123,7 @@ kubectl -n tenant-a get networkpolicies
 kubectl -n tenant-b get networkpolicies
 ```
 
-Expected: one `netiso-<uid>-a` in `tenant-a` and one `netiso-<uid>-b` in `tenant-b`. If the phase is `Rejected`, read `.status.message` — it names the precondition that failed.
+Expected: one `netiso-<uid>-0` in `tenant-a` and one `netiso-<uid>-1` in `tenant-b`. If the phase is `Rejected`, read `.status.message` — it names the precondition that failed.
 
 - [ ] **Step 8: Confirm deletion restores the cluster**
 
@@ -3220,7 +3265,7 @@ check reachable "B->A pod IP   TCP" probe tenant-b dashboard tcp "$gwIP"
 check reachable "B->A pod IP   UDP" probe tenant-b dashboard udp "$gwIP"
 check reachable "A->B ClusterIP TCP" probe tenant-a gateway   tcp "$dashSvc"
 
-left=$(kubectl get networkpolicies -A -l hardening.acme.corp/operation -o name | wc -l | tr -d ' ')
+left=$(kubectl get networkpolicies -A -l hardening.k8s.io/operation -o name | wc -l | tr -d ' ')
 if [ "$left" != "0" ]; then
   echo "FAIL  $left owned policies survived deletion"
   fail=1
@@ -3401,4 +3446,4 @@ Covers AC-07 and the NFR-06 reproducibility requirements."
    policies exist and stay, so `Degraded` and retried. Task 5, Step 11 pins both
    halves, and covers the `Degraded`→`Active` recovery the spec lists as a gap
    (G-03).
-3. **The owner annotation.** `hardening.acme.corp/owner` is not in the spec. It exists so a NetworkPolicy event can be mapped back to its owning object without an in-memory index, which FR-04's "watch NetworkPolicy objects" otherwise requires. It is additive metadata on a policy this operation owns; it changes no behaviour the spec describes.
+3. **The owner annotation.** `hardening.k8s.io/owner` is not in the spec. It exists so a NetworkPolicy event can be mapped back to its owning object without an in-memory index, which FR-04's "watch NetworkPolicy objects" otherwise requires. It is additive metadata on a policy this operation owns; it changes no behaviour the spec describes.

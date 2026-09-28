@@ -20,12 +20,9 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
-        - name: Matched-A
-          type: integer
-          jsonPath: .status.matchedA
-        - name: Matched-B
-          type: integer
-          jsonPath: .status.matchedB
+        - name: Matched
+          type: string
+          jsonPath: .status.peers[*].matched
         - name: Message
           type: string
           jsonPath: .status.message
@@ -43,54 +40,61 @@ spec:
           properties:
             spec:
               type: object
-              required: [a, b]
+              required: [peers]
               x-kubernetes-validations:
                 - rule: self == oldSelf
                   message: >-
                     spec is immutable; delete this object, wait for cleanup,
                     and create a new one to retarget
               properties:
-                a: &group
-                  type: object
-                  required: [namespace, podSelector]
-                  properties:
-                    namespace:
-                      type: string
-                      maxLength: 63
-                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-                    podSelector:
-                      type: object
-                      required: [matchLabels]
-                      properties:
-                        matchLabels:
-                          type: object
-                          description: 1-8 equality requirements. All must match.
-                          minProperties: 1
-                          maxProperties: 8
-                          additionalProperties:
-                            type: string
-                            maxLength: 63
-                            pattern: '^(|[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$'
-                          x-kubernetes-validations:
-                            - rule: >-
-                                self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$'))
-                              message: every key must be a valid Kubernetes label key
-                        matchExpressions:
-                          type: array
-                          description: >-
-                            Not supported. The controller generates the
-                            negations itself; operators supply equality maps
-                            only.
-                          maxItems: 0
-                          items:
+                peers:
+                  type: array
+                  description: >-
+                    Exactly two pod groups. They are symmetric: traffic is
+                    blocked between them in both directions, and their order
+                    carries no meaning beyond indexing the generated policies.
+                  minItems: 2
+                  maxItems: 2
+                  items:
+                    type: object
+                    required: [namespace, podSelector]
+                    properties:
+                      namespace:
+                        type: string
+                        maxLength: 63
+                        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                      podSelector:
+                        type: object
+                        required: [matchLabels]
+                        properties:
+                          matchLabels:
                             type: object
-                            properties:
-                              key: {type: string}
-                              operator: {type: string}
-                              values:
-                                type: array
-                                items: {type: string}
-                b: *group
+                            description: 1-8 equality requirements. All must match.
+                            minProperties: 1
+                            maxProperties: 8
+                            additionalProperties:
+                              type: string
+                              maxLength: 63
+                              pattern: '^(|[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)$'
+                            x-kubernetes-validations:
+                              - rule: >-
+                                  self.all(k, k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$'))
+                                message: every key must be a valid Kubernetes label key
+                          matchExpressions:
+                            type: array
+                            description: >-
+                              Not supported. The controller generates the
+                              negations itself; operators supply equality maps
+                              only.
+                            maxItems: 0
+                            items:
+                              type: object
+                              properties:
+                                key: {type: string}
+                                operator: {type: string}
+                                values:
+                                  type: array
+                                  items: {type: string}
             status:
               type: object
               properties:
@@ -99,13 +103,14 @@ spec:
                   enum: [Pending, Rejected, Active, Degraded, Deleting]
                 message:
                   type: string
-                policies:
+                peers:
                   type: array
-                  items: {type: string}
-                matchedA:
-                  type: integer
-                matchedB:
-                  type: integer
+                  description: Index-aligned with spec.peers.
+                  items:
+                    type: object
+                    properties:
+                      policy: {type: string}
+                      matched: {type: integer}
                 lastReconcileTime:
                   type: string
                   format: date-time

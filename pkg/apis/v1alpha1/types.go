@@ -51,20 +51,28 @@ type Group struct {
 }
 
 // Spec is immutable once created, enforced by a CEL rule in the CRD (FR-01).
+// Peers always holds exactly two entries: the CRD pins the length, because one
+// pair needs no policy compiler and several pairs are separate objects (D-01).
+// The two are symmetric — the block is mutual, and their order carries no
+// meaning beyond indexing the generated policies.
 type Spec struct {
-	A Group `json:"a"`
-	B Group `json:"b"`
+	Peers []Group `json:"peers"`
 }
 
-// Status reports what the controller observed. MatchedA and MatchedB carry no
+// PeerStatus is what the controller observed about one peer. Matched carries no
 // omitempty: zero is an observation and is reported explicitly (FR-05).
+type PeerStatus struct {
+	Policy  string `json:"policy"`
+	Matched int    `json:"matched"`
+}
+
+// Status reports what the controller observed. Peers is index-aligned with
+// Spec.Peers.
 type Status struct {
-	Phase             Phase    `json:"phase,omitempty"`
-	Message           string   `json:"message,omitempty"`
-	Policies          []string `json:"policies,omitempty"`
-	MatchedA          int      `json:"matchedA"`
-	MatchedB          int      `json:"matchedB"`
-	LastReconcileTime string   `json:"lastReconcileTime,omitempty"`
+	Phase             Phase        `json:"phase,omitempty"`
+	Message           string       `json:"message,omitempty"`
+	Peers             []PeerStatus `json:"peers,omitempty"`
+	LastReconcileTime string       `json:"lastReconcileTime,omitempty"`
 }
 
 type NetworkIsolation struct {

@@ -102,14 +102,13 @@ metadata:
   name: gateway-dashboard
   namespace: isolation-system
 spec:
-  a:
-    namespace: tenant-a
-    podSelector:
-      matchLabels: { app: gateway }
-  b:
-    namespace: tenant-b
-    podSelector:
-      matchLabels: { app: dashboard }
+  peers:
+    - namespace: tenant-a
+      podSelector:
+        matchLabels: { app: gateway }
+    - namespace: tenant-b
+      podSelector:
+        matchLabels: { app: dashboard }
 ```
 
 Both groups are required. `matchLabels` holds 1–8 entries; `matchExpressions` and empty selectors are

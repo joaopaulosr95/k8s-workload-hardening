@@ -15,10 +15,10 @@ const testUID = "6f1b2c33-4d5e-6f70-8192-a3b4c5d6e7f8"
 func isolation(aNS string, aLabels map[string]string, bNS string, bLabels map[string]string) *v1alpha1.NetworkIsolation {
 	return &v1alpha1.NetworkIsolation{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw-dash", Namespace: "isolation-system", UID: testUID},
-		Spec: v1alpha1.Spec{
-			A: v1alpha1.Group{Namespace: aNS, PodSelector: metav1.LabelSelector{MatchLabels: aLabels}},
-			B: v1alpha1.Group{Namespace: bNS, PodSelector: metav1.LabelSelector{MatchLabels: bLabels}},
-		},
+		Spec: v1alpha1.Spec{Peers: []v1alpha1.Group{
+			{Namespace: aNS, PodSelector: metav1.LabelSelector{MatchLabels: aLabels}},
+			{Namespace: bNS, PodSelector: metav1.LabelSelector{MatchLabels: bLabels}},
+		}},
 	}
 }
 
@@ -33,15 +33,15 @@ func TestBuildShape(t *testing.T) {
 		t.Fatalf("got %d policies, want 2", len(got))
 	}
 
-	nameA, nameB := Names(testUID)
+	names := Names(testUID)
 	cases := []struct {
 		p        *networkingv1.NetworkPolicy
 		name, ns string
 		selector map[string]string
 		peers    int
 	}{
-		{got[0], nameA, "tenant-a", map[string]string{"app": "gateway"}, 3},                  // 1 + len(B labels)
-		{got[1], nameB, "tenant-b", map[string]string{"app": "dashboard", "tier": "web"}, 2}, // 1 + len(A labels)
+		{got[0], names[0], "tenant-a", map[string]string{"app": "gateway"}, 3},                  // 1 + len(peers[1] labels)
+		{got[1], names[1], "tenant-b", map[string]string{"app": "dashboard", "tier": "web"}, 2}, // 1 + len(peers[0] labels)
 	}
 	for _, c := range cases {
 		if c.p.Name != c.name || c.p.Namespace != c.ns {

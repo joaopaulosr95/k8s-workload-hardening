@@ -23,13 +23,15 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 			"deletionTimestamp": now.UTC().Format("2006-01-02T15:04:05Z"),
 		},
 		"spec": map[string]any{
-			"a": map[string]any{
-				"namespace":   "tenant-a",
-				"podSelector": map[string]any{"matchLabels": map[string]any{"app": "gateway"}},
-			},
-			"b": map[string]any{
-				"namespace":   "tenant-b",
-				"podSelector": map[string]any{"matchLabels": map[string]any{"app": "dashboard"}},
+			"peers": []any{
+				map[string]any{
+					"namespace":   "tenant-a",
+					"podSelector": map[string]any{"matchLabels": map[string]any{"app": "gateway"}},
+				},
+				map[string]any{
+					"namespace":   "tenant-b",
+					"podSelector": map[string]any{"matchLabels": map[string]any{"app": "dashboard"}},
+				},
 			},
 		},
 	}}
@@ -47,7 +49,10 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 	if iso.DeletionTimestamp == nil {
 		t.Error("DeletionTimestamp lost in conversion")
 	}
-	if iso.Spec.A.Namespace != "tenant-a" || iso.Spec.B.PodSelector.MatchLabels["app"] != "dashboard" {
+	if len(iso.Spec.Peers) != 2 {
+		t.Fatalf("got %d peers, want 2", len(iso.Spec.Peers))
+	}
+	if iso.Spec.Peers[0].Namespace != "tenant-a" || iso.Spec.Peers[1].PodSelector.MatchLabels["app"] != "dashboard" {
 		t.Errorf("Spec = %+v", iso.Spec)
 	}
 
@@ -66,7 +71,10 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 // Zero counts are part of the report, not an absence (FR-05), so they must not
 // be dropped by omitempty on the way out.
 func TestZeroCountsAreSerialised(t *testing.T) {
-	iso := &NetworkIsolation{Status: Status{Phase: PhaseActive, MatchedA: 0, MatchedB: 0}}
+	iso := &NetworkIsolation{Status: Status{
+		Phase: PhaseActive,
+		Peers: []PeerStatus{{Policy: "netiso-x-0", Matched: 0}, {Policy: "netiso-x-1", Matched: 0}},
+	}}
 	out, err := ToUnstructured(iso)
 	if err != nil {
 		t.Fatalf("ToUnstructured: %v", err)
@@ -75,11 +83,15 @@ func TestZeroCountsAreSerialised(t *testing.T) {
 	if !ok {
 		t.Fatal("status missing")
 	}
-	if _, ok := status["matchedA"]; !ok {
-		t.Error("matchedA dropped when zero")
+	peers, ok := status["peers"].([]any)
+	if !ok || len(peers) != 2 {
+		t.Fatalf("status.peers = %v", status["peers"])
 	}
-	if _, ok := status["matchedB"]; !ok {
-		t.Error("matchedB dropped when zero")
+	for i, raw := range peers {
+		peer := raw.(map[string]any)
+		if _, ok := peer["matched"]; !ok {
+			t.Errorf("peer %d: matched dropped when zero", i)
+		}
 	}
 }
 
@@ -92,7 +104,7 @@ func TestFromUnstructuredRejectsMalformedObject(t *testing.T) {
 		"kind":       Kind,
 		"metadata":   map[string]any{"name": "bad", "namespace": "isolation-system"},
 		"spec": map[string]any{
-			"a": map[string]any{"namespace": int64(42)}, // namespace is a string
+			"peers": []any{map[string]any{"namespace": int64(42)}}, // namespace is a string
 		},
 	}}
 

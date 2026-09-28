@@ -6,6 +6,7 @@ package policy
 import (
 	"maps"
 	"slices"
+	"strconv"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,24 +19,31 @@ import (
 // having to label it.
 const namespaceNameLabel = "kubernetes.io/metadata.name"
 
-// Names returns the deterministic policy names for an operation: the policy
-// protecting group A, then the one protecting group B (FR-03). A UID is 36
-// characters of lowercase hex and hyphens, so the result is always a valid
-// DNS-1123 subdomain and needs no hashing or truncation.
-func Names(uid string) (string, string) {
-	return "netiso-" + uid + "-a", "netiso-" + uid + "-b"
+// Name returns the deterministic name of the policy protecting peer i (FR-03).
+// A UID is 36 characters of lowercase hex and hyphens, so the result is always
+// a valid DNS-1123 subdomain and needs no hashing or truncation. The index is
+// stable because the spec is immutable.
+func Name(uid string, i int) string {
+	return "netiso-" + uid + "-" + strconv.Itoa(i)
 }
 
-// Build returns the two policies for iso: element 0 protects group A and lives
-// in A's namespace, element 1 protects group B and lives in B's.
+// Names returns the policy names for an operation, index-aligned with
+// spec.peers.
+func Names(uid string) []string {
+	return []string{Name(uid, 0), Name(uid, 1)}
+}
+
+// Build returns the two policies for iso, index-aligned with spec.peers:
+// element i protects peers[i], lives in its namespace, and excludes the other.
 func Build(iso *v1alpha1.NetworkIsolation) []*networkingv1.NetworkPolicy {
 	uid := string(iso.UID)
 	owner := iso.Namespace + "/" + iso.Name
-	nameA, nameB := Names(uid)
-	return []*networkingv1.NetworkPolicy{
-		build(nameA, uid, owner, iso.Spec.A, iso.Spec.B),
-		build(nameB, uid, owner, iso.Spec.B, iso.Spec.A),
+	out := make([]*networkingv1.NetworkPolicy, len(iso.Spec.Peers))
+	for i, self := range iso.Spec.Peers {
+		other := iso.Spec.Peers[len(iso.Spec.Peers)-1-i]
+		out[i] = build(Name(uid, i), uid, owner, self, other)
 	}
+	return out
 }
 
 // build produces the ingress-only policy that protects self by allowing every
