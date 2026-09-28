@@ -20,9 +20,12 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
-        - name: Matched
-          type: string
-          jsonPath: .status.peers[*].matched
+        - name: Peer-0
+          type: integer
+          jsonPath: .status.peers[0].matched
+        - name: Peer-1
+          type: integer
+          jsonPath: .status.peers[1].matched
         - name: Message
           type: string
           jsonPath: .status.message

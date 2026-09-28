@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: network-isolation
+  namespace: isolation-system
+  labels: {app: network-isolation}
+spec:
+  # One replica. FR-04 states single-writer exclusivity as an operational
+  # precondition; there is no leader election yet (G-01).
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: network-isolation}
+  template:
+    metadata:
+      labels: {app: network-isolation}
+    spec:
+      serviceAccountName: network-isolation
+      securityContext:
+        runAsNonRoot: true
+        # Numeric: the kubelet cannot verify a non-root image user given only
+        # a name. 65532 is distroless's "nonroot".
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: controller
+          image: ghcr.io/joaopaulosr95/k8s-workload-hardening:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-v=2", "-resync=30s"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 128Mi}

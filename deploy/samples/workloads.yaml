@@ -1,0 +1,95 @@
+# Sample workloads for the isolation demo. Every pod runs the same busybox
+# probe: httpd on 8080/TCP and an nc echo loop on 8081/UDP, so one image covers
+# both protocols AC-07 requires.
+apiVersion: v1
+kind: Namespace
+metadata: {name: tenant-a}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: tenant-b}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: tenant-c}
+---
+# gateway: the first peer
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gateway
+  namespace: tenant-a
+  labels: {app: gateway}
+spec:
+  containers:
+    - name: probe
+      image: busybox:1.37
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          mkdir -p /srv && hostname > /srv/index.html
+          httpd -f -p 8080 -h /srv &
+          while true; do hostname | nc -u -l -p 8081 -w 1 >/dev/null 2>&1; done
+      ports:
+        - {containerPort: 8080, protocol: TCP}
+        - {containerPort: 8081, protocol: UDP}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gateway, namespace: tenant-a}
+spec:
+  selector: {app: gateway}
+  ports:
+    - {name: tcp, port: 8080, targetPort: 8080, protocol: TCP}
+    - {name: udp, port: 8081, targetPort: 8081, protocol: UDP}
+---
+# dashboard: the second peer
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dashboard
+  namespace: tenant-b
+  labels: {app: dashboard}
+spec:
+  containers:
+    - name: probe
+      image: busybox:1.37
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          mkdir -p /srv && hostname > /srv/index.html
+          httpd -f -p 8080 -h /srv &
+          while true; do hostname | nc -u -l -p 8081 -w 1 >/dev/null 2>&1; done
+      ports:
+        - {containerPort: 8080, protocol: TCP}
+        - {containerPort: 8081, protocol: UDP}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dashboard, namespace: tenant-b}
+spec:
+  selector: {app: dashboard}
+  ports:
+    - {name: tcp, port: 8080, targetPort: 8080, protocol: TCP}
+    - {name: udp, port: 8081, targetPort: 8081, protocol: UDP}
+---
+# bystander: in neither peer, must keep talking to both throughout
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bystander
+  namespace: tenant-c
+  labels: {app: bystander}
+spec:
+  containers:
+    - name: probe
+      image: busybox:1.37
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          mkdir -p /srv && hostname > /srv/index.html
+          httpd -f -p 8080 -h /srv &
+          while true; do hostname | nc -u -l -p 8081 -w 1 >/dev/null 2>&1; done
+      ports:
+        - {containerPort: 8080, protocol: TCP}
+        - {containerPort: 8081, protocol: UDP}

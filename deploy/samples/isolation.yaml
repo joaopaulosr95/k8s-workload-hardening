@@ -1,0 +1,13 @@
+apiVersion: hardening.acme.corp/v1alpha1
+kind: NetworkIsolation
+metadata:
+  name: gateway-dashboard
+  namespace: isolation-system
+spec:
+  peers:
+    - namespace: tenant-a
+      podSelector:
+        matchLabels: { app: gateway }
+    - namespace: tenant-b
+      podSelector:
+        matchLabels: { app: dashboard }

@@ -1,5 +1,7 @@
 .github/
+.superpowers/
 deploy/
 docs/
 hack/
 specs/
+vendor/
