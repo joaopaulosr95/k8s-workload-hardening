@@ -10,20 +10,35 @@
 
 **Spec:** `specs/001-network-isolation/spec.md` (read it alongside this plan; every task cites the requirement it implements)
 
+**Status: executed and merged (PR #1).** This document is the plan as carried out, kept
+in step with the code where the two would otherwise contradict each other. Three fixes
+landed after the plan was written and are **not** reflected in the code blocks below.
+Where they disagree, the shipped code is correct:
+
+| Commit    | What changed in the code, not here                                                                                                     |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `4c555c9` | The finalizer is added with a **merge patch**, not the whole-object `Update` shown in Task 5. A PUT loses a concurrent write to the object. |
+| `ec35cba` | Contamination is evaluated **per namespace** after activation, so a foreign policy in one peer's namespace no longer freezes repair in the other. Activation itself still refuses on either (BR-03). Transient API errors now report a phase instead of leaving it blank. |
+| `bb62284` | `hack/verify-isolation.sh` additionally asserts UDP over **ClusterIP** (not pod IP alone) and that the gateway's readiness probe survives isolation. |
+
+Earlier drift has been repaired rather than annotated: the API group is
+`hardening.acme.corp` throughout (`2b86936`, which `350030b` partly reverted), and every
+manifest uses the two-item `spec.peers` list (`350030b`).
+
 ---
 
 ## Global Constraints
 
 - **Module path:** `github.com/joaopaulosr95/k8s-workload-hardening`. Go 1.27.1.
 - **No new module dependencies.** `dynamic`, `dynamic/fake`, `dynamic/dynamicinformer`, `informers`, `kubernetes/fake` all live inside the already-required `k8s.io/client-go` module; they are absent from `vendor/` only because nothing imports them yet. **After adding any new k8s import, run `go mod vendor` and commit the vendor changes in the same commit.**
-- **API group/version/kind:** `hardening.k8s.io` / `v1alpha1` / `NetworkIsolation`, plural `networkisolations`, namespaced, status subresource.
-- **Finalizer:** exactly `hardening.k8s.io/cleanup`.
-- **Ownership label:** exactly `hardening.k8s.io/operation`, value = the object's UID.
-- **Owner annotation:** exactly `hardening.k8s.io/owner`, value = `<isolation namespace>/<isolation name>`.
+- **API group/version/kind:** `hardening.acme.corp` / `v1alpha1` / `NetworkIsolation`, plural `networkisolations`, namespaced, status subresource.
+- **Finalizer:** exactly `hardening.acme.corp/cleanup`.
+- **Ownership label:** exactly `hardening.acme.corp/operation`, value = the object's UID.
+- **Owner annotation:** exactly `hardening.acme.corp/owner`, value = `<isolation namespace>/<isolation name>`.
 - **Policy names:** `netiso-<uid>-0` and `netiso-<uid>-1`, index-aligned with `spec.peers`. Deterministic, no hashing; the index is stable because `spec` is immutable.
 - **Namespace label used in peers:** `kubernetes.io/metadata.name` (set automatically by the API server since v1.21).
 - **Protected namespaces (BR-05):** `kube-system`, `kube-public`, `kube-node-lease`, the controller's own namespace, plus anything passed on the `-protected-namespaces` flag.
-- **Never** delete, update or adopt a NetworkPolicy that does not carry this operation's UID in `hardening.k8s.io/operation` (BR-03, FR-03).
+- **Never** delete, update or adopt a NetworkPolicy that does not carry this operation's UID in `hardening.acme.corp/operation` (BR-03, FR-03).
 - **No egress rules, no `ipBlock`, no pod IP enumeration** in anything generated (FR-02).
 - **Coverage:** `go test ./pkg/... -cover` must reach ≥90% per package (NFR-05, AGENTS.md). `cmd/` is wiring and is excluded from that number.
 - **AGENTS.md role constraint:** do not edit `specs/001-network-isolation/spec.md`. If the implementation needs behaviour the spec does not describe, stop and raise it.
@@ -210,19 +225,19 @@ import (
 )
 
 const (
-	GroupName = "hardening.k8s.io"
+	GroupName = "hardening.acme.corp"
 	Version   = "v1alpha1"
 	Kind      = "NetworkIsolation"
 
 	// Finalizer is persisted before the first policy write, so cleanup is
 	// guaranteed a chance to run (FR-03).
-	Finalizer = "hardening.k8s.io/cleanup"
+	Finalizer = "hardening.acme.corp/cleanup"
 	// OperationLabel carries the owning object's UID on every generated policy.
 	// Only policies bearing it are ever updated or deleted.
-	OperationLabel = "hardening.k8s.io/operation"
+	OperationLabel = "hardening.acme.corp/operation"
 	// OwnerAnnotation records "<namespace>/<name>" of the owning object, so a
 	// policy event can be mapped back to the object without a lookup table.
-	OwnerAnnotation = "hardening.k8s.io/owner"
+	OwnerAnnotation = "hardening.acme.corp/owner"
 )
 
 // Resource is the GVR the dynamic client uses for NetworkIsolation objects.
@@ -870,7 +885,7 @@ kubectl apply -f deploy/crd.yaml
 kubectl get crd networkisolations.hardening.acme.corp
 ```
 
-Expected: `customresourcedefinition.apiextensions.k8s.io/networkisolations.hardening.k8s.io created`, then the CRD listed. A schema error appears here, not later.
+Expected: `customresourcedefinition.apiextensions.k8s.io/networkisolations.hardening.acme.corp created`, then the CRD listed. A schema error appears here, not later.
 
 - [ ] **Step 3: Write the validation script**
 
@@ -888,11 +903,20 @@ fail=0
 cleanup() { kubectl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-# expect_reject <description> <<<manifest
+# expect_reject <description> <expected-error-substring> <<<manifest
+#
+# The expected substring is not decoration: without it a manifest that fails to
+# parse, or one rejected for an unrelated reason, reads as a passing test. The
+# point is that the API server rejects it for the reason the schema encodes.
 expect_reject() {
-  local what=$1
-  if kubectl apply -f - >/dev/null 2>&1; then
+  local what=$1 want=$2 out
+  if out=$(kubectl apply -f - 2>&1); then
     echo "FAIL  accepted: $what"
+    fail=1
+  elif ! printf '%s' "$out" | grep -qF "$want"; then
+    echo "FAIL  rejected for the wrong reason: $what"
+    echo "        want substring: $want"
+    echo "        got: $(printf '%s' "$out" | head -2 | tr '\n' ' ')"
     fail=1
   else
     echo "ok    rejected: $what"
@@ -902,73 +926,97 @@ expect_reject() {
 kubectl apply -f deploy/crd.yaml >/dev/null
 kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-expect_reject "object missing group b" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+expect_reject "only one peer supplied" "should have at least 2 items" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
-metadata: {name: missing-b, namespace: $ns}
+metadata: {name: one-peer, namespace: $ns}
 spec:
-  a: {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
+  peers:
+    - {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
 EOF
 
-expect_reject "matchExpressions supplied" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+expect_reject "three peers supplied" "Too many: 3: must have at most 2 items" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
+kind: NetworkIsolation
+metadata: {name: three-peers, namespace: $ns}
+spec:
+  peers:
+    - {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
+    - {namespace: tenant-b, podSelector: {matchLabels: {app: dashboard}}}
+    - {namespace: tenant-c, podSelector: {matchLabels: {app: extra}}}
+EOF
+
+expect_reject "peers omitted entirely" "spec.peers: Required value" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
+kind: NetworkIsolation
+metadata: {name: no-peers, namespace: $ns}
+spec: {}
+EOF
+
+expect_reject "matchExpressions supplied" "matchExpressions: Too many" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: with-expressions, namespace: $ns}
 spec:
-  a:
-    namespace: tenant-a
-    podSelector:
-      matchLabels: {app: gateway}
-      matchExpressions: [{key: app, operator: In, values: [gateway]}]
-  b: {namespace: tenant-b, podSelector: {matchLabels: {app: dashboard}}}
+  peers:
+    - namespace: tenant-a
+      podSelector:
+        matchLabels: {app: gateway}
+        matchExpressions: [{key: app, operator: In, values: [gateway]}]
+    - {namespace: tenant-b, podSelector: {matchLabels: {app: dashboard}}}
 EOF
 
-expect_reject "empty matchLabels" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+expect_reject "empty matchLabels" "should have at least 1 properties" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: empty-labels, namespace: $ns}
 spec:
-  a: {namespace: tenant-a, podSelector: {matchLabels: {}}}
-  b: {namespace: tenant-b, podSelector: {matchLabels: {app: dashboard}}}
+  peers:
+    - {namespace: tenant-a, podSelector: {matchLabels: {}}}
+    - {namespace: tenant-b, podSelector: {matchLabels: {app: dashboard}}}
 EOF
 
-expect_reject "invalid namespace name" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+expect_reject "invalid namespace name" "spec.peers[0].namespace in body should match" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: bad-namespace, namespace: $ns}
 spec:
-  a: {namespace: Tenant_A, podSelector: {matchLabels: {app: gateway}}}
-  b: {namespace: tenant-b, podSelector: {matchLabels: {app: dashboard}}}
+  peers:
+    - {namespace: Tenant_A, podSelector: {matchLabels: {app: gateway}}}
+    - {namespace: tenant-b, podSelector: {matchLabels: {app: dashboard}}}
 EOF
 
 # A prefixed label key is legal and must be accepted (Review Focus 4).
 cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
-  a: {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
-  b: {namespace: tenant-b, podSelector: {matchLabels: {example.com/tier: gold}}}
+  peers:
+    - {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
+    - {namespace: tenant-b, podSelector: {matchLabels: {example.com/tier: gold}}}
 EOF
 echo "ok    accepted: valid object with a prefixed label key"
 
-expect_reject "edit to an immutable spec" <<EOF
-apiVersion: hardening.k8s.io/v1alpha1
+expect_reject "edit to an immutable spec" "spec is immutable" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
-  a: {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
-  b: {namespace: tenant-b, podSelector: {matchLabels: {app: retargeted}}}
+  peers:
+    - {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
+    - {namespace: tenant-b, podSelector: {matchLabels: {app: retargeted}}}
 EOF
 
 # Re-applying the identical spec must still be allowed: self == oldSelf holds.
 cat <<EOF | kubectl apply -f - >/dev/null
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata: {name: valid, namespace: $ns}
 spec:
-  a: {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
-  b: {namespace: tenant-b, podSelector: {matchLabels: {example.com/tier: gold}}}
+  peers:
+    - {namespace: tenant-a, podSelector: {matchLabels: {app: gateway}}}
+    - {namespace: tenant-b, podSelector: {matchLabels: {example.com/tier: gold}}}
 EOF
 echo "ok    accepted: re-apply of an unchanged spec"
 
@@ -1196,13 +1244,13 @@ func TestValidateForeignPolicies(t *testing.T) {
 		{"explicitly egress-only", netpol("tenant-b", "legacy", []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}, nil), false},
 		{
 			"our own policy from a previous pass",
-			netpol("tenant-b", "netiso-"+uid+"-b", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			netpol("tenant-b", "netiso-"+uid+"-1", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 				map[string]string{v1alpha1.OperationLabel: uid}),
 			false,
 		},
 		{
 			"another operation's policy is foreign",
-			netpol("tenant-b", "netiso-other-b", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			netpol("tenant-b", "netiso-other-1", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 				map[string]string{v1alpha1.OperationLabel: "some-other-uid"}),
 			true,
 		},
@@ -2875,13 +2923,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "namespaces"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["hardening.k8s.io"]
+  - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations"]
     verbs: ["get", "list", "watch", "update"]
-  - apiGroups: ["hardening.k8s.io"]
+  - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations/status"]
     verbs: ["get", "update", "patch"]
-  - apiGroups: ["hardening.k8s.io"]
+  - apiGroups: ["hardening.acme.corp"]
     resources: ["networkisolations/finalizers"]
     verbs: ["update"]
 ---
@@ -3045,20 +3093,19 @@ spec:
 Create `deploy/samples/isolation.yaml`:
 
 ```yaml
-apiVersion: hardening.k8s.io/v1alpha1
+apiVersion: hardening.acme.corp/v1alpha1
 kind: NetworkIsolation
 metadata:
   name: gateway-dashboard
   namespace: isolation-system
 spec:
-  a:
-    namespace: tenant-a
-    podSelector:
-      matchLabels: { app: gateway }
-  b:
-    namespace: tenant-b
-    podSelector:
-      matchLabels: { app: dashboard }
+  peers:
+    - namespace: tenant-a
+      podSelector:
+        matchLabels: { app: gateway }
+    - namespace: tenant-b
+      podSelector:
+        matchLabels: { app: dashboard }
 ```
 
 - [ ] **Step 6: Add the Makefile targets**
@@ -3265,7 +3312,7 @@ check reachable "B->A pod IP   TCP" probe tenant-b dashboard tcp "$gwIP"
 check reachable "B->A pod IP   UDP" probe tenant-b dashboard udp "$gwIP"
 check reachable "A->B ClusterIP TCP" probe tenant-a gateway   tcp "$dashSvc"
 
-left=$(kubectl get networkpolicies -A -l hardening.k8s.io/operation -o name | wc -l | tr -d ' ')
+left=$(kubectl get networkpolicies -A -l hardening.acme.corp/operation -o name | wc -l | tr -d ' ')
 if [ "$left" != "0" ]; then
   echo "FAIL  $left owned policies survived deletion"
   fail=1
@@ -3446,4 +3493,4 @@ Covers AC-07 and the NFR-06 reproducibility requirements."
    policies exist and stay, so `Degraded` and retried. Task 5, Step 11 pins both
    halves, and covers the `Degraded`→`Active` recovery the spec lists as a gap
    (G-03).
-3. **The owner annotation.** `hardening.k8s.io/owner` is not in the spec. It exists so a NetworkPolicy event can be mapped back to its owning object without an in-memory index, which FR-04's "watch NetworkPolicy objects" otherwise requires. It is additive metadata on a policy this operation owns; it changes no behaviour the spec describes.
+3. **The owner annotation.** `hardening.acme.corp/owner` is not in the spec. It exists so a NetworkPolicy event can be mapped back to its owning object without an in-memory index, which FR-04's "watch NetworkPolicy objects" otherwise requires. It is additive metadata on a policy this operation owns; it changes no behaviour the spec describes.
