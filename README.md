@@ -50,14 +50,14 @@ make cover        # coverage
 
 ## Tested versions
 
-| | |
-|---|---|
-| kind | v0.32.0 (4-node cluster: 1 control-plane, 3 workers) |
-| Kubernetes (kubelet) | v1.36.1 |
-| kubectl | v1.36.2 |
-| Go | 1.27.1 |
-| Docker | 29.4.0 |
-| CNI | kind's default (kindnetd), which enforces NetworkPolicy from kind v0.24.0 |
+|                      |                                                                           |
+| -------------------- | ------------------------------------------------------------------------- |
+| kind                 | v0.32.0 (4-node cluster: 1 control-plane, 3 workers)                      |
+| Kubernetes (kubelet) | v1.36.1                                                                   |
+| kubectl              | v1.36.2                                                                   |
+| Go                   | 1.27.1                                                                    |
+| Docker               | 29.4.0                                                                    |
+| CNI                  | kind's default (kindnetd), which enforces NetworkPolicy from kind v0.24.0 |
 
 Behaviour on other CNIs is untested.
 
@@ -65,8 +65,8 @@ Behaviour on other CNIs is untested.
 
 NetworkPolicy is additive and allow-only: there is no deny rule, and a
 restrictive policy cannot override another that permits the same traffic. A
-prohibition is therefore written as *allow everything except the opposing
-group*.
+prohibition is therefore written as _allow everything except the opposing
+group_.
 
 For a peer in namespace `N` with labels `k1=v1, k2=v2`, the policy protecting
 the other peer allows:
@@ -89,7 +89,7 @@ pair.
 ## Decisions
 
 - **Plain client-go, no framework.** The brief recommends it and the task needs
-  nothing more. The custom resource is read and written through the *dynamic*
+  nothing more. The custom resource is read and written through the _dynamic_
   client with `unstructured`, converted to hand-written structs via
   `runtime.DefaultUnstructuredConverter` — so there is no code-generation step
   and no generated clientset to keep in sync. Total dependency set is what
@@ -128,13 +128,13 @@ pair.
 
 ## Status
 
-| Phase | Meaning |
-|---|---|
-| `Pending` | Not yet evaluated |
-| `Rejected` | A precondition failed; nothing was written |
-| `Active` | Both policies present and preconditions hold |
+| Phase      | Meaning                                                   |
+| ---------- | --------------------------------------------------------- |
+| `Pending`  | Not yet evaluated                                         |
+| `Rejected` | A precondition failed; nothing was written                |
+| `Active`   | Both policies present and preconditions hold              |
 | `Degraded` | Accepted, but incomplete or an assumption no longer holds |
-| `Deleting` | Removal in progress |
+| `Deleting` | Removal in progress                                       |
 
 `Active` means the policies exist as configured. It does not assert that packets
 have been verified — that is what `make verify` is for.
@@ -209,7 +209,7 @@ table that includes the missing-key row, the extra-labels row and the
 same-labels-other-namespace row. Inverting `NotIn` to `In` fails it everywhere.
 
 **The foreign-policy refusal** (`pkg/controller/validate_test.go`). NetworkPolicy
-is additive, so an allow rule placed beside an existing ingress policy *widens*
+is additive, so an allow rule placed beside an existing ingress policy _widens_
 access instead of narrowing it. The test covers the `policyTypes` defaulting rule
 specifically: omitted, empty, explicit `Ingress`, and `[Egress, Ingress]` all
 refuse; only an explicit `["Egress"]` is safe to ignore. That defaulting is the
