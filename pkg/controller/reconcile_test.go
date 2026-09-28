@@ -35,7 +35,10 @@ func dynClient(t *testing.T, iso *v1alpha1.NetworkIsolation) *dynamicfake.FakeDy
 		&unstructured.UnstructuredList{})
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		scheme,
-		map[schema.GroupVersionResource]string{v1alpha1.Resource: v1alpha1.Kind + "List"},
+		map[schema.GroupVersionResource]string{
+			v1alpha1.Resource:          v1alpha1.Kind + "List",
+			v1alpha1.HardeningResource: v1alpha1.HardeningKind + "List",
+		},
 		u,
 	)
 }

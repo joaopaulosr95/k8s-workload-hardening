@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,15 +66,16 @@ func (q *fakeQueue) Done(k string)           { q.done = append(q.done, k) }
 // A failed reconcile is retried, never dropped: abandoning a key would leave an
 // isolation request unserved or a cleanup half-finished.
 func TestProcessNextRequeuesOnError(t *testing.T) {
-	q := &fakeQueue{items: []string{"isolation-system/gw-dash"}}
-	c := &Controller{queue: q, reconcile: func(context.Context, string) error {
-		return errors.New("apiserver is down")
+	key := queueKey("networkisolations", "isolation-system", "gw-dash")
+	q := &fakeQueue{items: []string{key}}
+	c := &Controller{queue: q, reconcile: map[string]func(context.Context, string) error{
+		"networkisolations": func(context.Context, string) error { return errors.New("apiserver is down") },
 	}}
 
 	if !c.processNext(context.Background()) {
 		t.Fatal("processNext returned false, want it to keep working")
 	}
-	if len(q.requeued) != 1 || q.requeued[0] != "isolation-system/gw-dash" {
+	if len(q.requeued) != 1 || q.requeued[0] != key {
 		t.Errorf("requeued = %v, want the key retried", q.requeued)
 	}
 	if len(q.forgotten) != 0 {
@@ -85,8 +87,11 @@ func TestProcessNextRequeuesOnError(t *testing.T) {
 }
 
 func TestProcessNextForgetsOnSuccess(t *testing.T) {
-	q := &fakeQueue{items: []string{"isolation-system/gw-dash"}}
-	c := &Controller{queue: q, reconcile: func(context.Context, string) error { return nil }}
+	key := queueKey("networkisolations", "isolation-system", "gw-dash")
+	q := &fakeQueue{items: []string{key}}
+	c := &Controller{queue: q, reconcile: map[string]func(context.Context, string) error{
+		"networkisolations": func(context.Context, string) error { return nil },
+	}}
 
 	if !c.processNext(context.Background()) {
 		t.Fatal("processNext returned false, want it to keep working")
@@ -100,7 +105,7 @@ func TestProcessNextForgetsOnSuccess(t *testing.T) {
 }
 
 func TestProcessNextStopsWhenQueueDrains(t *testing.T) {
-	c := &Controller{queue: &fakeQueue{}, reconcile: func(context.Context, string) error { return nil }}
+	c := &Controller{queue: &fakeQueue{}, reconcile: map[string]func(context.Context, string) error{}}
 	if c.processNext(context.Background()) {
 		t.Error("processNext returned true on a shut-down queue, want false")
 	}
@@ -120,8 +125,8 @@ func TestEnqueuePolicy(t *testing.T) {
 		obj  any
 		want []string
 	}{
-		{"owned policy", owned, []string{"isolation-system/gw-dash"}},
-		{"tombstone", cache.DeletedFinalStateUnknown{Key: "tenant-a/netiso-x-0", Obj: owned}, []string{"isolation-system/gw-dash"}},
+		{"owned policy", owned, []string{"networkisolations|isolation-system/gw-dash"}},
+		{"tombstone", cache.DeletedFinalStateUnknown{Key: "tenant-a/netiso-x-0", Obj: owned}, []string{"networkisolations|isolation-system/gw-dash"}},
 		{"no owner annotation", unowned, nil},
 		{"not an object", "a string", nil},
 	}
@@ -151,7 +156,10 @@ func TestNewAndRun(t *testing.T) {
 	r := newReconciler(ns("tenant-a"), ns("tenant-b"))
 	r.Dyn = dynClient(t, object)
 
-	c, err := New(r.Kube, r.Dyn, r, time.Hour)
+	hardener := &HardeningReconciler{
+		Kube: r.Kube, Dyn: r.Dyn, Protected: r.Protected, Timeout: r.Timeout, Now: r.Now,
+	}
+	c, err := New(r.Kube, r.Dyn, r, hardener, time.Hour)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -186,5 +194,70 @@ func TestNewAndRun(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Run did not return after the context was cancelled")
+	}
+}
+
+// One queue serves two custom resources, so a key has to carry the resource it
+// came from. A bare "namespace/name" would send a WorkloadHardening to the
+// NetworkIsolation reconciler, which would report it NotFound and forget it.
+func TestQueueKeyRoundTrip(t *testing.T) {
+	key := queueKey(v1alpha1.HardeningResource.Resource, "isolation-system", "tenant-hardening")
+	if key != "workloadhardenings|isolation-system/tenant-hardening" {
+		t.Errorf("queueKey = %q", key)
+	}
+
+	resource, object, err := splitQueueKey(key)
+	if err != nil {
+		t.Fatalf("splitQueueKey: %v", err)
+	}
+	if resource != "workloadhardenings" || object != "isolation-system/tenant-hardening" {
+		t.Errorf("splitQueueKey = (%q, %q)", resource, object)
+	}
+
+	for _, bad := range []string{"", "isolation-system/gw-dash", "|isolation-system/gw-dash", "networkisolations|"} {
+		if _, _, err := splitQueueKey(bad); err == nil {
+			t.Errorf("splitQueueKey(%q) accepted a malformed key", bad)
+		}
+	}
+}
+
+// Each resource reaches its own reconciler, and an unknown one is dropped
+// rather than retried forever against a reconciler that cannot serve it.
+func TestProcessNextRoutesByResource(t *testing.T) {
+	var served []string
+	c := &Controller{
+		queue: &fakeQueue{items: []string{
+			queueKey("networkisolations", "isolation-system", "gw-dash"),
+			queueKey("workloadhardenings", "isolation-system", "tenant-hardening"),
+			"unknownresource|isolation-system/whatever",
+		}},
+		reconcile: map[string]func(context.Context, string) error{
+			"networkisolations": func(_ context.Context, key string) error {
+				served = append(served, "iso:"+key)
+				return nil
+			},
+			"workloadhardenings": func(_ context.Context, key string) error {
+				served = append(served, "hardening:"+key)
+				return nil
+			},
+		},
+	}
+
+	for range 3 {
+		if !c.processNext(context.Background()) {
+			t.Fatal("processNext returned false while the queue still held items")
+		}
+	}
+
+	want := []string{"iso:isolation-system/gw-dash", "hardening:isolation-system/tenant-hardening"}
+	if strings.Join(served, ",") != strings.Join(want, ",") {
+		t.Errorf("served = %v, want %v", served, want)
+	}
+	q := c.queue.(*fakeQueue)
+	if len(q.requeued) != 0 {
+		t.Errorf("requeued = %v; an unroutable key must be dropped, not retried forever", q.requeued)
+	}
+	if len(q.done) != 3 {
+		t.Errorf("done = %v, want every key released exactly once", q.done)
 	}
 }

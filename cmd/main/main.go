@@ -53,13 +53,24 @@ func main() {
 	protected := protectedNamespaces(*extra)
 	logger.Info("Starting", "protectedNamespaces", slices.Sorted(maps.Keys(protected)), "resync", *resync)
 
-	c, err := controller.New(kube, dyn, &controller.Reconciler{
+	isolation := &controller.Reconciler{
 		Kube:      kube,
 		Dyn:       dyn,
 		Protected: protected,
 		Timeout:   *timeout,
 		Now:       time.Now,
-	}, *resync)
+	}
+	// The same clients, the same protected set and the same timeouts. The
+	// hardening reconciler keeps its own dry-run cache and nothing else.
+	hardening := &controller.HardeningReconciler{
+		Kube:      kube,
+		Dyn:       dyn,
+		Protected: protected,
+		Timeout:   *timeout,
+		Now:       time.Now,
+	}
+
+	c, err := controller.New(kube, dyn, isolation, hardening, *resync)
 	if err != nil {
 		logger.Error(err, "Building the controller failed")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
