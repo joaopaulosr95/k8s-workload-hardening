@@ -2,7 +2,7 @@ TAG ?= dev
 IMAGE ?= ghcr.io/joaopaulosr95/k8s-workload-hardening
 CLUSTER ?= hardening
 
-.PHONY: test cover image kind-up kind-down deploy samples verify verify-crd
+.PHONY: test cover image kind-up kind-down deploy samples verify verify-crd verify-crd-hardening
 
 test:
 	go test ./pkg/... -race
@@ -39,3 +39,6 @@ verify: deploy samples
 
 verify-crd:
 	./hack/verify-crd.sh
+
+verify-crd-hardening:
+	./hack/verify-crd-hardening.sh

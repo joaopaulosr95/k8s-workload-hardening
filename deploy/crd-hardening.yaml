@@ -1,0 +1,170 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workloadhardenings.hardening.acme.corp
+spec:
+  group: hardening.acme.corp
+  scope: Namespaced
+  names:
+    plural: workloadhardenings
+    singular: workloadhardening
+    kind: WorkloadHardening
+    shortNames: [wh]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Namespaces
+          type: string
+          jsonPath: .spec.namespaces
+        - name: Approved
+          type: string
+          jsonPath: .spec.approvedPlan
+        - name: Message
+          type: string
+          jsonPath: .status.message
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            Fills in missing resource requests and missing securityContext
+            hardening across one or more namespaces. Creating the object
+            requests a preview; copying hashes out of status.plan into
+            spec.approvedPlan requests those patches. There is no undo.
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [namespaces, resources]
+              x-kubernetes-validations:
+                # approvedPlan is the only mutable field. Everything else is
+                # immutable, so retargeting means a new object (BR-07). The
+                # three comparisons need no has() guards: namespaces and
+                # resources are required, and securityContext carries a
+                # default, so all three are always present after defaulting.
+                - rule: >-
+                    self.namespaces == oldSelf.namespaces &&
+                    self.resources == oldSelf.resources &&
+                    self.securityContext == oldSelf.securityContext
+                  message: >-
+                    only spec.approvedPlan may be changed; delete this object
+                    and create a new one to retarget
+              properties:
+                namespaces:
+                  type: array
+                  description: >-
+                    1-16 namespaces to harden, named explicitly. An explicit
+                    list is what keeps the blast radius readable in the object
+                    itself (D-11).
+                  minItems: 1
+                  maxItems: 16
+                  x-kubernetes-list-type: set
+                  items:
+                    type: string
+                    maxLength: 63
+                    pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                resources:
+                  type: object
+                  required: [requests]
+                  properties:
+                    requests:
+                      type: object
+                      description: >-
+                        The value written into an absent request. Both cpu and
+                        memory are required.
+                      required: [cpu, memory]
+                      properties:
+                        cpu:
+                          type: string
+                          pattern: '^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$'
+                        memory:
+                          type: string
+                          pattern: '^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$'
+                    limits:
+                      type: object
+                      description: >-
+                        Not supported, and never will be. Limits are never
+                        written: the tool cannot know a workload's working set,
+                        and a memory limit that is too small kills the
+                        container after a rollout that completed green. Add a
+                        LimitRange to the namespace instead (BR-03, D-07).
+                      maxProperties: 0
+                      additionalProperties:
+                        type: string
+                securityContext:
+                  type: object
+                  default: { readOnlyRootFilesystem: false }
+                  properties:
+                    readOnlyRootFilesystem:
+                      type: boolean
+                      default: false
+                      description: >-
+                        Opt-in. Not part of the restricted Pod Security
+                        Standard, and the one policy field whose failure is
+                        reliably late (BR-02, D-06).
+                approvedPlan:
+                  type: array
+                  description: >-
+                    Change hashes copied out of status.plan[].hash. The only
+                    mutable field. A plan larger than 128 is approved in
+                    batches, which per-target semantics make safe.
+                  maxItems: 128
+                  items:
+                    type: string
+                    pattern: "^[0-9a-f]{12}$"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    [Pending, Rejected, Previewed, Applied, PartiallyApplied]
+                message:
+                  type: string
+                plan:
+                  type: array
+                  description: One row per target the plan would change.
+                  items:
+                    type: object
+                    properties:
+                      namespace: { type: string }
+                      kind: { type: string }
+                      name: { type: string }
+                      hash: { type: string }
+                      fields:
+                        type: array
+                        items: { type: string }
+                      pods: { type: integer }
+                      rollout: { type: string }
+                      outcome: { type: string }
+                      reason: { type: string }
+                findings:
+                  type: array
+                  description: Observed and reported, never patched.
+                  items:
+                    type: object
+                    properties:
+                      namespace: { type: string }
+                      kind: { type: string }
+                      name: { type: string }
+                      container: { type: string }
+                      reason: { type: string }
+                # The generation of the spec this status describes. Applied is
+                # terminal only while it matches metadata.generation, because
+                # approvedPlan is the only mutable field and an edit to it must
+                # be acted on (FR-05).
+                observedGeneration:
+                  type: integer
+                  format: int64
+                lastReconcileTime:
+                  type: string
+                  format: date-time
