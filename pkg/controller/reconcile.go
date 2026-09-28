@@ -70,7 +70,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 
 // activate validates, persists the finalizer, writes both policies and reports.
 func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1alpha1.NetworkIsolation) error {
-	c, err := r.validate(ctx, iso)
+	v, err := r.validate(ctx, iso)
 	var rej *rejection
 	if errors.As(err, &rej) {
 		// Before activation, a failed precondition means nothing was written:
@@ -95,11 +95,33 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 		return nil
 	}
 	if err != nil {
+		// A transient failure, not a precondition failure. Report it anyway:
+		// an object with a blank phase is indistinguishable from one the
+		// controller has never seen, and an operator cannot tell a wedged
+		// reconcile from a controller that is not running.
+		phase := v1alpha1.PhasePending
+		if slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
+			phase = v1alpha1.PhaseDegraded
+		}
+		if statusErr := r.setStatus(ctx, iso, v1alpha1.Status{
+			Phase:   phase,
+			Message: err.Error(),
+			Peers:   iso.Status.Peers,
+		}); statusErr != nil {
+			logger.Error(statusErr, "Could not report the failure")
+		}
 		return err
 	}
 
-	// Nothing is written until cleanup is guaranteed a chance to run (FR-03).
+	// BR-03 governs activation: if either namespace already holds a foreign
+	// ingress policy, refuse the whole operation and write nothing. Once the
+	// policies exist, the same condition is handled per namespace below.
 	if !slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
+		if v.contaminated() {
+			logger.Info("Rejected", "reason", v.reasons())
+			return r.setStatus(ctx, iso, v1alpha1.Status{Phase: v1alpha1.PhaseRejected, Message: v.reasons()})
+		}
+		// Nothing is written until cleanup is guaranteed a chance to run (FR-03).
 		if err := r.patchFinalizers(ctx, iso, append(slices.Clone(iso.Finalizers), v1alpha1.Finalizer)); err != nil {
 			return err
 		}
@@ -109,7 +131,14 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 	peers := make([]v1alpha1.PeerStatus, len(desired))
 	var failures []string
 	for i, want := range desired {
-		peers[i] = v1alpha1.PeerStatus{Policy: want.Name, Matched: c[i]}
+		peers[i] = v1alpha1.PeerStatus{Policy: want.Name, Matched: v.matched[i]}
+		if v.blocked[i] != "" {
+			// Do not add an allow rule beside someone else's ingress policy.
+			// The other peer's policy is still maintained below: half a block
+			// left unrepaired is traffic flowing, whatever status would claim.
+			failures = append(failures, v.blocked[i])
+			continue
+		}
 		if err := r.applyPolicy(ctx, want, string(iso.UID)); err != nil {
 			// Whatever succeeded stays: rolling back would reopen traffic
 			// this operation was asked to block (FR-04).

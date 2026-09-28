@@ -192,13 +192,22 @@ func TestValidateForeignPolicies(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			r := newReconciler(ns("tenant-a"), ns("tenant-b"), c.policy)
-			_, err := r.validate(context.Background(),
+			v, err := r.validate(context.Background(),
 				iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"}))
-
-			var rej *rejection
-			gotRejection := errors.As(err, &rej)
-			if gotRejection != c.rejected {
-				t.Fatalf("rejected = %v (err %v), want %v", gotRejection, err, c.rejected)
+			if err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			if v.contaminated() != c.rejected {
+				t.Fatalf("contaminated = %v (%q), want %v", v.contaminated(), v.reasons(), c.rejected)
+			}
+			if c.rejected {
+				// Contamination is scoped to the namespace holding the policy.
+				if v.blocked[1] == "" {
+					t.Error("tenant-b not marked blocked")
+				}
+				if v.blocked[0] != "" {
+					t.Errorf("tenant-a marked blocked by a policy in tenant-b: %q", v.blocked[0])
+				}
 			}
 			assertNoWrites(t, r)
 
@@ -227,14 +236,14 @@ func TestValidateCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if len(c) != 2 {
-		t.Fatalf("got %d counts, want 2", len(c))
+	if len(c.matched) != 2 {
+		t.Fatalf("got %d counts, want 2", len(c.matched))
 	}
-	if c[0] != 2 {
-		t.Errorf("counts[0] = %d, want 2", c[0])
+	if c.matched[0] != 2 {
+		t.Errorf("matched[0] = %d, want 2", c.matched[0])
 	}
-	if c[1] != 0 {
-		t.Errorf("counts[1] = %d, want 0", c[1])
+	if c.matched[1] != 0 {
+		t.Errorf("matched[1] = %d, want 0", c.matched[1])
 	}
 }
 
@@ -269,5 +278,35 @@ func assertNoWrites(t *testing.T, r *Reconciler) {
 		default:
 			t.Errorf("unexpected write: %s %s", a.GetVerb(), a.GetResource().Resource)
 		}
+	}
+}
+
+// A selector the CRD's shape rules accept but the API server's label parser
+// refuses must be a rejection, not an infinite retry. labels.SelectorFromSet
+// performs no validation, so an over-long key reached the server as a 400 and
+// wedged the object with a blank phase.
+func TestValidateRejectsUnparseableSelector(t *testing.T) {
+	cases := []struct {
+		name  string
+		label map[string]string
+	}{
+		{"key name over 63 characters", map[string]string{strings.Repeat("a", 64): "v"}},
+		{"key prefix over 253 characters", map[string]string{strings.Repeat("a", 254) + "/name": "v"}},
+		{"value over 63 characters", map[string]string{"app": strings.Repeat("a", 64)}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+			_, err := r.validate(context.Background(), iso("tenant-a", c.label, "tenant-b", map[string]string{"app": "dashboard"}))
+
+			var rej *rejection
+			if !errors.As(err, &rej) {
+				t.Fatalf("err = %v, want a *rejection so the object reports why", err)
+			}
+			if !strings.Contains(rej.reason, "selector") {
+				t.Errorf("reason = %q, want it to name the selector as the problem", rej.reason)
+			}
+			assertNoWrites(t, r)
+		})
 	}
 }

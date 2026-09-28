@@ -682,3 +682,138 @@ func TestFinalizerRemovalIsPatchedNotPut(t *testing.T) {
 		t.Errorf("finalizers = %v, want empty", got.Finalizers)
 	}
 }
+
+// An API failure during a pass must still leave the object explaining itself.
+// A blank phase is indistinguishable from "the controller is not running", and
+// that ambiguity is what made the finalizer-patch RBAC gap invisible until it
+// was run in a cluster.
+func TestTransientErrorStillReportsStatus(t *testing.T) {
+	t.Run("before activation", func(t *testing.T) {
+		object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+		r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+		r.Dyn = dynClient(t, object)
+		r.Kube.(*fake.Clientset).PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("apiserver is down")
+		})
+
+		if err := r.Reconcile(context.Background(), key(object)); err == nil {
+			t.Fatal("want an error so the key is requeued")
+		}
+		got := stored(t, r, object)
+		if got.Status.Phase != v1alpha1.PhasePending {
+			t.Errorf("phase = %q, want Pending: it has not been evaluated yet", got.Status.Phase)
+		}
+		if !strings.Contains(got.Status.Message, "apiserver is down") {
+			t.Errorf("message = %q, want the API server's reason", got.Status.Message)
+		}
+		if len(got.Finalizers) != 0 {
+			t.Errorf("finalizers = %v, want none: nothing was written", got.Finalizers)
+		}
+	})
+
+	t.Run("after activation", func(t *testing.T) {
+		object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+		r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+		r.Dyn = dynClient(t, object)
+		if err := r.Reconcile(context.Background(), key(object)); err != nil {
+			t.Fatalf("activation: %v", err)
+		}
+		r.Kube.(*fake.Clientset).PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("apiserver is down")
+		})
+
+		if err := r.Reconcile(context.Background(), key(object)); err == nil {
+			t.Fatal("want an error so the key is requeued")
+		}
+		got := stored(t, r, object)
+		if got.Status.Phase != v1alpha1.PhaseDegraded {
+			t.Errorf("phase = %q, want Degraded: the policies are in place", got.Status.Phase)
+		}
+		if !strings.Contains(got.Status.Message, "apiserver is down") {
+			t.Errorf("message = %q, want the API server's reason", got.Status.Message)
+		}
+	})
+}
+
+// Contamination is per-namespace. A foreign ingress policy in one peer's
+// namespace is a reason not to write there; it is not a reason to stop
+// maintaining the other peer's policy, which is what keeps half the block in
+// place. Freezing all repair leaves traffic flowing while status claims the
+// policies are retained.
+func TestDegradedStillRepairsTheCleanNamespace(t *testing.T) {
+	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("activation: %v", err)
+	}
+	names := policy.Names(uid)
+
+	// A platform team drops a default-deny into tenant-a...
+	foreign := netpol("tenant-a", "default-deny", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, nil)
+	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Create(context.Background(), foreign, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the foreign policy: %v", err)
+	}
+	// ...and, independently, a GitOps prune deletes our policy in tenant-b.
+	if err := r.Kube.NetworkingV1().NetworkPolicies("tenant-b").Delete(context.Background(), names[1], metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("deleting the owned policy: %v", err)
+	}
+
+	if err := r.Reconcile(context.Background(), key(object)); err == nil {
+		t.Error("want an error so the object keeps retrying")
+	}
+
+	got := stored(t, r, object)
+	if got.Status.Phase != v1alpha1.PhaseDegraded {
+		t.Errorf("phase = %q, want Degraded", got.Status.Phase)
+	}
+	if !strings.Contains(got.Status.Message, "default-deny") {
+		t.Errorf("message = %q, want it to name the foreign policy", got.Status.Message)
+	}
+
+	// tenant-b is clean, so its policy must be back: without it, every pod in
+	// tenant-a can reach the dashboard.
+	if _, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-b").Get(context.Background(), names[1], metav1.GetOptions{}); err != nil {
+		t.Errorf("the clean namespace's policy was not repaired: %v", err)
+	}
+	// tenant-a is contaminated, so nothing new is written there.
+	pols, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(pols.Items) != 2 { // the pre-existing owned policy plus the foreign one
+		t.Errorf("tenant-a holds %d policies, want the original two untouched", len(pols.Items))
+	}
+}
+
+// BR-03 still governs first activation: a foreign ingress policy in either
+// namespace refuses the whole operation and writes nothing at all.
+func TestForeignPolicyBeforeActivationWritesNothing(t *testing.T) {
+	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+	foreign := netpol("tenant-b", "legacy", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, nil)
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), foreign)
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got := stored(t, r, object)
+	if got.Status.Phase != v1alpha1.PhaseRejected {
+		t.Errorf("phase = %q, want Rejected", got.Status.Phase)
+	}
+	if len(got.Finalizers) != 0 {
+		t.Errorf("finalizers = %v, want none", got.Finalizers)
+	}
+	for _, namespace := range []string{"tenant-a", "tenant-b"} {
+		pols, err := r.Kube.NetworkingV1().NetworkPolicies(namespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, p := range pols.Items {
+			if p.Labels[v1alpha1.OperationLabel] != "" {
+				t.Errorf("%s/%s was written despite the foreign policy", namespace, p.Name)
+			}
+		}
+	}
+}
