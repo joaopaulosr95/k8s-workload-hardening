@@ -144,6 +144,16 @@ finalizer is the marker. Absent, nothing was ever written, so `Rejected`.
 Present, the policies are in place and stay there, so `Degraded` and retried —
 and the object recovers by itself when the cause clears.
 
+Contamination by a foreign ingress policy is tracked **per namespace**. Before
+activation, a foreign policy in either namespace refuses the whole operation
+(BR-03). After activation, only the affected namespace is left alone; the other
+peer's policy is still repaired if something deletes it. Freezing both would
+leave half the block missing while status claimed otherwise.
+
+A transient API failure is reported too — `Pending` before activation,
+`Degraded` after — rather than leaving a blank phase, which is
+indistinguishable from a controller that is not running.
+
 ## Limitations
 
 These are limits of NetworkPolicy, not of this implementation:
@@ -161,6 +171,18 @@ These are limits of NetworkPolicy, not of this implementation:
   `ipBlock: 0.0.0.0/0` allowance would admit the whole non-pod address space —
   including any translated source — into the group being contained. Traffic
   arriving through an in-cluster proxy or ingress controller still works.
+- **Node-originated traffic, including kubelet probes, matches no peer.** The
+  policies allow pod sources only, so whether a probed workload keeps its
+  readiness depends on how the CNI treats non-pod sources. On the tested CNI
+  (kindnetd) probes are unaffected — the `gateway` sample carries a readiness
+  probe and `make verify` asserts it stays Ready throughout. On a CNI that
+  enforces ingress for node traffic, an isolated workload would drop out of its
+  Service, which is worse than the block you asked for. Check this before using
+  it anywhere else.
+- **A foreign ingress policy is noticed on resync, not immediately.** The
+  NetworkPolicy informer watches only policies this tool owns, so a foreign one
+  appearing in a participating namespace is detected within one resync period
+  (30s by default), not on arrival.
 - **IPv4 kind with the default CNI only.** Other CNIs, IPv6 and dual-stack are
   untested.
 - A namespace deleted and recreated under the same name is treated as the same
@@ -195,6 +217,11 @@ part a reader is most likely to skip.
 
 Fake-client tests are not evidence of packet enforcement. `make verify` is:
 it asserts TCP **and** UDP, over pod IP **and** ClusterIP, in both directions,
-before / after convergence / after deletion, while checking DNS and an unrelated
-pod stay reachable throughout.
+before / after convergence / after deletion, while checking that DNS, an
+unrelated pod, and the kubelet's readiness probe are unaffected throughout.
+
+Nor are they evidence of RBAC. Switching the finalizer write from a PUT to a
+patch passed every unit test and then failed in-cluster with a `Forbidden`,
+because the ClusterRole granted `update` but not `patch`. Only `make deploy`
+followed by `make verify` catches that class.
 

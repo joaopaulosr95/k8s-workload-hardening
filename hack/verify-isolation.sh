@@ -20,6 +20,11 @@ probe() {
   [ -n "$out" ]
 }
 
+# pod_ready <namespace> <pod> - 0 if the kubelet still considers it Ready.
+pod_ready() {
+  [ "$(kubectl -n "$1" get pod "$2" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = "True" ]
+}
+
 check() {
   local want=$1 desc=$2; shift 2
   if "$@"; then got=reachable; else got=blocked; fi
@@ -55,10 +60,13 @@ check reachable "A->B pod IP   UDP" probe tenant-a gateway   udp "$dashIP"
 check reachable "B->A pod IP   TCP" probe tenant-b dashboard tcp "$gwIP"
 check reachable "B->A pod IP   UDP" probe tenant-b dashboard udp "$gwIP"
 check reachable "A->B ClusterIP TCP" probe tenant-a gateway   tcp "$dashSvc"
+check reachable "A->B ClusterIP UDP" probe tenant-a gateway   udp "$dashSvc"
 check reachable "B->A ClusterIP TCP" probe tenant-b dashboard tcp "$gwSvc"
+check reachable "B->A ClusterIP UDP" probe tenant-b dashboard udp "$gwSvc"
 check reachable "A->bystander  TCP" probe tenant-a gateway   tcp "$bystanderIP"
 check reachable "bystander->A  TCP" probe tenant-c bystander tcp "$gwIP"
 check reachable "DNS from A"        kubectl exec -n tenant-a gateway -- nslookup kubernetes.default.svc.cluster.local
+check reachable "kubelet probe keeps A ready" pod_ready tenant-a gateway
 
 echo
 echo "== applying isolation =="
@@ -75,12 +83,18 @@ check blocked   "A->B pod IP   UDP" probe tenant-a gateway   udp "$dashIP"
 check blocked   "B->A pod IP   TCP" probe tenant-b dashboard tcp "$gwIP"
 check blocked   "B->A pod IP   UDP" probe tenant-b dashboard udp "$gwIP"
 check blocked   "A->B ClusterIP TCP" probe tenant-a gateway   tcp "$dashSvc"
+check blocked   "A->B ClusterIP UDP" probe tenant-a gateway   udp "$dashSvc"
 check blocked   "B->A ClusterIP TCP" probe tenant-b dashboard tcp "$gwSvc"
+check blocked   "B->A ClusterIP UDP" probe tenant-b dashboard udp "$gwSvc"
 check reachable "A->bystander  TCP" probe tenant-a gateway   tcp "$bystanderIP"
 check reachable "bystander->A  TCP" probe tenant-c bystander tcp "$gwIP"
 check reachable "bystander->B  TCP" probe tenant-c bystander tcp "$dashIP"
 check reachable "DNS from A"        kubectl exec -n tenant-a gateway -- nslookup kubernetes.default.svc.cluster.local
 check reachable "DNS from B"        kubectl exec -n tenant-b dashboard -- nslookup kubernetes.default.svc.cluster.local
+# Kubelet probes originate from the node, and the policies allow pod sources
+# only. If the CNI enforces ingress for non-pod sources, an isolated workload
+# silently drops out of its Service - far worse than the block asked for.
+check reachable "kubelet probe keeps A ready" pod_ready tenant-a gateway
 
 echo
 echo "== removing isolation =="
@@ -96,6 +110,8 @@ check reachable "A->B pod IP   UDP" probe tenant-a gateway   udp "$dashIP"
 check reachable "B->A pod IP   TCP" probe tenant-b dashboard tcp "$gwIP"
 check reachable "B->A pod IP   UDP" probe tenant-b dashboard udp "$gwIP"
 check reachable "A->B ClusterIP TCP" probe tenant-a gateway   tcp "$dashSvc"
+check reachable "A->B ClusterIP UDP" probe tenant-a gateway   udp "$dashSvc"
+check reachable "kubelet probe keeps A ready" pod_ready tenant-a gateway
 
 left=$(kubectl get networkpolicies -A -l hardening.acme.corp/operation -o name | wc -l | tr -d ' ')
 if [ "$left" != "0" ]; then
