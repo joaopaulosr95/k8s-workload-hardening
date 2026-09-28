@@ -721,3 +721,157 @@ func TestProvenanceRidesInTheSameRequest(t *testing.T) {
 		}
 	}
 }
+
+// AC-13: partial failure keeps what succeeded, reports PartiallyApplied, and
+// converges on retry without re-patching what already landed.
+//
+// Never roll back: a half-hardened namespace is not improved by un-hardening
+// the half that worked (FR-04).
+func TestPartialFailureKeepsWhatSucceededAndConverges(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"), deployment("tenant-a", "web"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	previewed := storedHardening(t, r, w)
+	arm(t, r, w,
+		rowFor(previewed, "Deployment", "api").Hash,
+		rowFor(previewed, "Deployment", "web").Hash)
+
+	// web's real write fails; its dry-run does not, so the pass gets as far as
+	// attempting the write and then has to keep api's success.
+	failing := true
+	r.Kube.(*fake.Clientset).PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		p := a.(k8stesting.PatchActionImpl)
+		if failing && p.Name == "web" && len(p.PatchOptions.DryRun) == 0 {
+			return true, nil, apierrors.NewInternalError(errors.New("etcd is unhappy"))
+		}
+		return false, nil, nil
+	})
+
+	err := r.Reconcile(context.Background(), hardeningKey(w))
+	if err == nil {
+		t.Error("a failed patch must return an error so the key is requeued")
+	}
+
+	got := storedHardening(t, r, w)
+	if got.Status.Phase != v1alpha1.PhasePartiallyApplied {
+		t.Errorf("phase = %q (%s), want PartiallyApplied", got.Status.Phase, got.Status.Message)
+	}
+	if api := rowFor(got, "Deployment", "api"); api.Outcome != v1alpha1.OutcomePatched {
+		t.Errorf("api outcome = %q, want Patched: what succeeded is kept", api.Outcome)
+	}
+	if web := rowFor(got, "Deployment", "web"); web.Outcome != v1alpha1.OutcomeFailed {
+		t.Errorf("web outcome = %q, want Failed", web.Outcome)
+	}
+	if storedTemplate(t, r, "tenant-a", "api").Annotations[v1alpha1.FilledAnnotation] == "" {
+		t.Error("api's patch was rolled back")
+	}
+
+	// The retry recomputes. api has no gaps left, so it is not re-patched;
+	// only web is addressed.
+	failing = false
+	r.Kube.(*fake.Clientset).ClearActions()
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+
+	for _, p := range patchActions(t, r) {
+		if p.Name == "api" {
+			t.Error("api was patched again; an already-patched target has no gaps left (BR-01)")
+		}
+	}
+
+	converged := storedHardening(t, r, w)
+	if converged.Status.Phase != v1alpha1.PhaseApplied {
+		t.Errorf("phase after retry = %q (%s), want Applied", converged.Status.Phase, converged.Status.Message)
+	}
+	// Both are still reported: an Applied object whose plan is empty tells an
+	// operator nothing about what it did.
+	for _, name := range []string{"api", "web"} {
+		if row := rowFor(converged, "Deployment", name); row.Outcome != v1alpha1.OutcomePatched {
+			t.Errorf("%s outcome after convergence = %q, want Patched", name, row.Outcome)
+		}
+		if storedTemplate(t, r, "tenant-a", name).Annotations[v1alpha1.FilledAnnotation] == "" {
+			t.Errorf("%s carries no provenance annotation", name)
+		}
+	}
+}
+
+// AC-14: an Applied object issues no API calls on resync, including one that
+// reached Applied with targets left Unapproved; a Rejected one is re-evaluated
+// and reaches Previewed once the cause clears.
+func TestTerminalAndRecoveringPhases(t *testing.T) {
+	t.Run("Applied is terminal, including with unapproved targets", func(t *testing.T) {
+		w := hardening("tenant-a")
+		r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"), deployment("tenant-a", "web"))
+		r.Dyn = hardeningDynClient(t, w)
+		dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+		if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+			t.Fatalf("preview: %v", err)
+		}
+		// Approve only one of the two.
+		arm(t, r, w, rowFor(storedHardening(t, r, w), "Deployment", "api").Hash)
+		if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+		applied := storedHardening(t, r, w)
+		if applied.Status.Phase != v1alpha1.PhaseApplied {
+			t.Fatalf("phase = %q (%s), want Applied", applied.Status.Phase, applied.Status.Message)
+		}
+		if rowFor(applied, "Deployment", "web").Outcome != v1alpha1.OutcomeUnapproved {
+			t.Fatal("web should have been left Unapproved")
+		}
+
+		r.Kube.(*fake.Clientset).ClearActions()
+		r.Dyn.(*dynamicfake.FakeDynamicClient).ClearActions()
+		if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+			t.Fatalf("resync: %v", err)
+		}
+
+		// No workload call of any kind: not a list, not a get, not a patch.
+		if n := len(r.Kube.(*fake.Clientset).Actions()); n != 0 {
+			t.Errorf("%d cluster calls on an Applied resync, want 0", n)
+		}
+		// The request itself is read — that is unavoidable — but never written.
+		for _, a := range r.Dyn.(*dynamicfake.FakeDynamicClient).Actions() {
+			switch a.GetVerb() {
+			case "get", "list", "watch":
+			default:
+				t.Errorf("unexpected write on an Applied resync: %s %s", a.GetVerb(), a.GetSubresource())
+			}
+		}
+	})
+
+	t.Run("Rejected recovers once the cause clears", func(t *testing.T) {
+		w := hardening("tenant-a", "tenant-b")
+		r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+		r.Dyn = hardeningDynClient(t, w)
+		dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+		if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+			t.Fatalf("first pass: %v", err)
+		}
+		if got := storedHardening(t, r, w); got.Status.Phase != v1alpha1.PhaseRejected {
+			t.Fatalf("phase = %q, want Rejected", got.Status.Phase)
+		}
+
+		if _, err := r.Kube.CoreV1().Namespaces().Create(context.Background(), ns("tenant-b"), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("creating tenant-b: %v", err)
+		}
+		if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+			t.Fatalf("recovery pass: %v", err)
+		}
+		got := storedHardening(t, r, w)
+		if got.Status.Phase != v1alpha1.PhasePreviewed {
+			t.Errorf("phase = %q (%s), want Previewed: Rejected is not terminal", got.Status.Phase, got.Status.Message)
+		}
+		if len(got.Status.Plan) == 0 {
+			t.Error("no plan published after recovery")
+		}
+	})
+}
