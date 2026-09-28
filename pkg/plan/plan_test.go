@@ -205,8 +205,10 @@ func TestSecurityContextPrecedence(t *testing.T) {
 		if _, ok := valueAt(p, "spec.template.spec.securityContext.runAsNonRoot"); ok {
 			t.Error("pod-level runAsNonRoot written where every container already declares it: the write reaches nothing")
 		}
-		if len(findingFor(p, "app")) != 0 {
-			t.Errorf("findings = %v, want none: the container is already hardened", findingFor(p, "app"))
+		// Narrowed to securityContext: BR-03 reports the absent limit on every
+		// container, hardened or not, and that finding is Task 4's business.
+		if mentions(findingFor(p, "app"), "runAsNonRoot") {
+			t.Errorf("findings = %v, want no securityContext finding: the container is already hardened", findingFor(p, "app"))
 		}
 	})
 
@@ -344,6 +346,7 @@ func TestRootEvidenceSuppressesRunAsNonRoot(t *testing.T) {
 		for _, path := range []string{
 			"spec.template.spec.containers[root].securityContext.allowPrivilegeEscalation",
 			"spec.template.spec.containers[root].securityContext.capabilities.drop",
+			"spec.template.spec.containers[root].resources.requests.cpu",
 		} {
 			if _, ok := valueAt(p, path); !ok {
 				t.Errorf("%s suppressed; only pod-level runAsNonRoot is (BR-02)", path)

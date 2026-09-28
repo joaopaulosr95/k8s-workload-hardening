@@ -292,12 +292,3 @@ func (p *Plan) buildContainer(pod *corev1.PodSpec, c container, policy Policy) {
 
 	p.buildResources(c, policy)
 }
-
-// buildResources is written in Task 4. The stub keeps Task 3 compiling; it
-// must be replaced, not kept.
-func (p *Plan) buildResources(c container, policy Policy) {}
-
-// Coverage is written in Task 4 alongside Cover and the real buildResources.
-// The stub keeps Policy's field typed and this task compiling; it supplies
-// nothing, which is what a namespace with no LimitRange supplies.
-type Coverage struct{}
