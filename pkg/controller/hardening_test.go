@@ -875,3 +875,259 @@ func TestTerminalAndRecoveringPhases(t *testing.T) {
 		}
 	})
 }
+
+// Review Focus 3: an approvedPlan holding hashes that match nothing — a
+// copy-paste from a stale preview, or an approval landing after someone else
+// patched the targets. Every target is then Unapproved, nothing fails, and
+// nothing is Stale. FR-06's literal reading makes that Applied, which is
+// terminal, so the operator's approval would silently do nothing forever and
+// no resync would ever look again.
+func TestApprovalMatchingNothingIsNotTerminal(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	// A hash that is well-formed and belongs to nothing.
+	arm(t, r, w, "deadbeef0000")
+
+	// The preview's dry-run is already recorded; the assertion below is about
+	// the apply pass, which must write nothing.
+	r.Kube.(*fake.Clientset).ClearActions()
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if got.Status.Phase == v1alpha1.PhaseApplied {
+		t.Fatal("phase = Applied: a terminal phase would strand the request with the approval having done nothing")
+	}
+	if got.Status.Phase != v1alpha1.PhasePartiallyApplied {
+		t.Errorf("phase = %q, want PartiallyApplied", got.Status.Phase)
+	}
+	if !strings.Contains(got.Status.Message, "none of the 1 approved hashes") {
+		t.Errorf("message = %q, want it to say the approval matched nothing", got.Status.Message)
+	}
+	if row := rowFor(got, "Deployment", "api"); row.Outcome != v1alpha1.OutcomeUnapproved {
+		t.Errorf("api outcome = %q, want Unapproved", row.Outcome)
+	}
+	if n := len(patchActions(t, r)); n != 0 {
+		t.Errorf("issued %d patches, want 0", n)
+	}
+
+	// Non-terminal, so correcting the approval still works.
+	arm(t, r, w, rowFor(got, "Deployment", "api").Hash)
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("corrected apply: %v", err)
+	}
+	if got := storedHardening(t, r, w); got.Status.Phase != v1alpha1.PhaseApplied {
+		t.Errorf("phase after correction = %q (%s), want Applied", got.Status.Phase, got.Status.Message)
+	}
+}
+
+// The half of Review Focus 3 that a count of Stale rows does not catch: one
+// approval lands and another matches nothing. Folding the phase on patched >
+// 0 gives Applied, which is terminal, and the second approval is never looked
+// at again — so the phase folds on danglingApprovals instead.
+func TestDanglingApprovalOutlivesASuccessfulPatch(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"), deployment("tenant-a", "web"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	previewed := storedHardening(t, r, w)
+
+	// One real approval, one that belongs to nothing.
+	arm(t, r, w, rowFor(previewed, "Deployment", "api").Hash, "deadbeef0000")
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if row := rowFor(got, "Deployment", "api"); row.Outcome != v1alpha1.OutcomePatched {
+		t.Errorf("api outcome = %q, want Patched: the real approval must still land", row.Outcome)
+	}
+	if got.Status.Phase == v1alpha1.PhaseApplied {
+		t.Fatal("phase = Applied: terminal, so the approval that matched nothing is never revisited")
+	}
+	if got.Status.Phase != v1alpha1.PhasePartiallyApplied {
+		t.Errorf("phase = %q (%s), want PartiallyApplied", got.Status.Phase, got.Status.Message)
+	}
+	if !strings.Contains(got.Status.Message, "1 of the 2 approved hashes") {
+		t.Errorf("message = %q, want it to name the dangling approval", got.Status.Message)
+	}
+
+	// Dropping the bad hash settles it: api stays patched and carries forward.
+	arm(t, r, w, rowFor(got, "Deployment", "api").Hash)
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("corrected apply: %v", err)
+	}
+	if got := storedHardening(t, r, w); got.Status.Phase != v1alpha1.PhaseApplied {
+		t.Errorf("phase after correction = %q (%s), want Applied", got.Status.Phase, got.Status.Message)
+	}
+}
+
+// AC-18: Applied is terminal only until the approval changes. approvedPlan is
+// the only mutable field in spec, so an operator extending it — FR-01's next
+// batch, or the rest of a subset deliberately approved earlier (BR-07) — must
+// be acted on. A resync that moves nothing still issues no API calls (AC-14).
+func TestApprovalExtendedAfterApplied(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"), deployment("tenant-a", "web"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	previewed := storedHardening(t, r, w)
+
+	// Approve a subset. BR-07 calls this the normal way to use the gate.
+	arm(t, r, w, rowFor(previewed, "Deployment", "api").Hash)
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("first batch: %v", err)
+	}
+	applied := storedHardening(t, r, w)
+	if applied.Status.Phase != v1alpha1.PhaseApplied {
+		t.Fatalf("phase = %q (%s), want Applied", applied.Status.Phase, applied.Status.Message)
+	}
+	if applied.Status.ObservedGeneration != applied.Generation {
+		t.Fatalf("observedGeneration = %d, want %d: the gate compares these two",
+			applied.Status.ObservedGeneration, applied.Generation)
+	}
+
+	// A resync moves no generation, so the object stays terminal and silent.
+	before := len(r.Kube.(*fake.Clientset).Actions())
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	if after := len(r.Kube.(*fake.Clientset).Actions()); after != before {
+		t.Errorf("resync issued %d API calls, want 0 (AC-14)", after-before)
+	}
+
+	// Extending the approval moves generation, so the terminal phase gives way.
+	patchesBefore := len(patchActions(t, r))
+	arm(t, r, w, rowFor(applied, "Deployment", "api").Hash, rowFor(previewed, "Deployment", "web").Hash)
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("second batch: %v", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if row := rowFor(got, "Deployment", "web"); row.Outcome != v1alpha1.OutcomePatched {
+		t.Errorf("web outcome = %q, want Patched: the extended approval was ignored", row.Outcome)
+	}
+	// api has no gaps left (BR-01), so it is not patched a second time.
+	for _, a := range patchActions(t, r)[patchesBefore:] {
+		if a.GetName() == "api" {
+			t.Error("api was patched again; BR-01 means an already-patched target has no gaps left")
+		}
+	}
+}
+
+// Review Focus 5: a namespace that vanishes between validation and apply.
+// Validation reads namespaces first and is all-or-nothing; the workload List
+// that follows returns an empty list, not NotFound, once the namespace is
+// gone. The request must not report Applied claiming it hardened a namespace
+// that no longer exists.
+func TestNamespaceVanishingBetweenValidationAndApply(t *testing.T) {
+	w := hardening("tenant-a", "tenant-b")
+	r := newHardener(
+		ns("tenant-a"), deployment("tenant-a", "api"),
+		ns("tenant-b"), deployment("tenant-b", "gone-soon"),
+	)
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	previewed := storedHardening(t, r, w)
+	arm(t, r, w, rowFor(previewed, "Deployment", "gone-soon").Hash)
+
+	// tenant-b's namespace object is still there — validation passes — but
+	// its contents are gone, so the List comes back empty rather than
+	// erroring. That is what a namespace being reaped looks like mid-pass.
+	if err := r.Kube.AppsV1().Deployments("tenant-b").
+		Delete(context.Background(), "gone-soon", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("deleting gone-soon: %v", err)
+	}
+
+	r.Kube.(*fake.Clientset).ClearActions()
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if got.Status.Phase == v1alpha1.PhaseApplied {
+		t.Fatal("phase = Applied: nothing was patched, and Applied is terminal")
+	}
+	if got.Status.Phase != v1alpha1.PhasePartiallyApplied {
+		t.Errorf("phase = %q (%s), want PartiallyApplied", got.Status.Phase, got.Status.Message)
+	}
+	// The vanished target is simply absent from the recomputed plan, not
+	// reported as Failed: it was never patched and nothing went wrong.
+	if row := rowFor(got, "Deployment", "gone-soon"); row.Outcome != "" {
+		t.Errorf("gone-soon outcome = %q, want it absent from the recomputed plan", row.Outcome)
+	}
+	if n := len(patchActions(t, r)); n != 0 {
+		t.Errorf("issued %d patches, want 0", n)
+	}
+
+	// And a namespace that disappears entirely rejects the whole object again,
+	// because validation is all-or-nothing (FR-05).
+	if err := r.Kube.CoreV1().Namespaces().Delete(context.Background(), "tenant-b", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("deleting tenant-b: %v", err)
+	}
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("post-deletion pass: %v", err)
+	}
+	after := storedHardening(t, r, w)
+	if after.Status.Phase != v1alpha1.PhaseRejected {
+		t.Errorf("phase = %q, want Rejected once the namespace is gone", after.Status.Phase)
+	}
+	if !strings.Contains(after.Status.Message, "tenant-b") {
+		t.Errorf("message = %q, want it to name the missing namespace", after.Status.Message)
+	}
+	// tenant-a was not patched either: the operator named two namespaces and
+	// gets both or neither.
+	if storedTemplate(t, r, "tenant-a", "api").Annotations[v1alpha1.FilledAnnotation] != "" {
+		t.Error("tenant-a was patched although the object is Rejected")
+	}
+}
+
+// NFR-04: a transient API failure is reported, not swallowed. An object with a
+// blank phase is indistinguishable from one the controller has never seen, so
+// an operator cannot tell a wedged reconcile from a controller that is not
+// running. The error is still returned, so the queue retries.
+func TestTransientFailureIsReportedAndRetried(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+
+	boom := errors.New("etcdserver: request timed out")
+	r.Kube.(*fake.Clientset).PrependReactor("list", "limitranges",
+		func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, boom })
+
+	err := r.Reconcile(context.Background(), hardeningKey(w))
+	if err == nil {
+		t.Fatal("Reconcile returned nil; a transient failure must be returned so the queue retries")
+	}
+	if !strings.Contains(err.Error(), "request timed out") {
+		t.Errorf("err = %v, want the cause carried through", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if got.Status.Phase != v1alpha1.PhasePending {
+		t.Errorf("phase = %q, want Pending: a blank phase reads as never seen", got.Status.Phase)
+	}
+	if !strings.Contains(got.Status.Message, "request timed out") {
+		t.Errorf("message = %q, want the cause named", got.Status.Message)
+	}
+}
