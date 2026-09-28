@@ -500,3 +500,116 @@ func TestCleanupWithoutFinalizerIsANoOp(t *testing.T) {
 	assertNoWrites(t, r)
 	assertNoCustomResourceWrites(t, r)
 }
+
+// FR-04 watches NetworkPolicy objects so drift is repaired. An owned policy
+// edited by hand must be rewritten from the spec on the next pass.
+func TestApplyPolicyRepairsDrift(t *testing.T) {
+	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("activation: %v", err)
+	}
+	names := policy.Names(uid)
+
+	// Someone widens the policy by hand: an empty peer list admits nothing,
+	// but an extra allow-all rule would admit the group we are containing.
+	api := r.Kube.NetworkingV1().NetworkPolicies("tenant-a")
+	drifted, err := api.Get(context.Background(), names[0], metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	drifted.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{}} // allow from anywhere
+	if _, err := api.Update(context.Background(), drifted, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	if err := r.Reconcile(context.Background(), key(object)); err != nil {
+		t.Fatalf("repair pass: %v", err)
+	}
+
+	repaired, err := api.Get(context.Background(), names[0], metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get after repair: %v", err)
+	}
+	if len(repaired.Spec.Ingress) != 1 || len(repaired.Spec.Ingress[0].From) != 2 {
+		t.Errorf("drift not repaired: ingress = %+v", repaired.Spec.Ingress)
+	}
+}
+
+// Error table: "Policy name occupied by a foreign object — conflict reported;
+// never overwritten." Validation refuses an ingress-affecting foreign policy,
+// so the only way to reach this is a foreign egress-only policy holding one of
+// our names.
+func TestApplyPolicyRefusesForeignNameCollision(t *testing.T) {
+	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+	names := policy.Names(uid)
+	squatter := netpol("tenant-a", names[0], []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		map[string]string{v1alpha1.OperationLabel: "some-other-uid"})
+	r := newReconciler(ns("tenant-a"), ns("tenant-b"), squatter)
+	r.Dyn = dynClient(t, object)
+
+	if err := r.Reconcile(context.Background(), key(object)); err == nil {
+		t.Error("want an error so the collision is retried")
+	}
+
+	got := stored(t, r, object)
+	if got.Status.Phase != v1alpha1.PhaseDegraded {
+		t.Errorf("phase = %q, want Degraded", got.Status.Phase)
+	}
+	if !strings.Contains(got.Status.Message, "does not own") {
+		t.Errorf("message = %q, want it to report the collision", got.Status.Message)
+	}
+
+	// Never overwritten.
+	after, err := r.Kube.NetworkingV1().NetworkPolicies("tenant-a").Get(context.Background(), names[0], metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("squatter disappeared: %v", err)
+	}
+	if after.Labels[v1alpha1.OperationLabel] != "some-other-uid" {
+		t.Errorf("squatter was adopted: labels = %v", after.Labels)
+	}
+	if len(after.Spec.PolicyTypes) != 1 || after.Spec.PolicyTypes[0] != networkingv1.PolicyTypeEgress {
+		t.Errorf("squatter was rewritten: %+v", after.Spec)
+	}
+}
+
+// An API failure is not a precondition failure. Reporting Rejected would claim
+// nothing was written and that retrying is pointless; both are wrong.
+func TestAPIErrorIsRetriedNotRejected(t *testing.T) {
+	for _, c := range []struct{ verb, resource string }{
+		{"list", "pods"},
+		{"list", "networkpolicies"},
+		{"get", "namespaces"},
+	} {
+		t.Run(c.verb+" "+c.resource, func(t *testing.T) {
+			object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
+			r := newReconciler(ns("tenant-a"), ns("tenant-b"))
+			r.Dyn = dynClient(t, object)
+			r.Kube.(*fake.Clientset).PrependReactor(c.verb, c.resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewServiceUnavailable("apiserver is down")
+			})
+
+			err := r.Reconcile(context.Background(), key(object))
+			if err == nil {
+				t.Fatal("want an error so the key is requeued")
+			}
+			var rej *rejection
+			if errors.As(err, &rej) {
+				t.Errorf("API error surfaced as a rejection: %v", err)
+			}
+			if got := stored(t, r, object); got.Status.Phase == v1alpha1.PhaseRejected {
+				t.Errorf("phase = Rejected, want it left alone for a retry")
+			}
+			assertNoWrites(t, r)
+		})
+	}
+}
+
+func TestRejectionError(t *testing.T) {
+	err := reject("namespace %q is protected", "kube-system")
+	if got, want := err.Error(), `namespace "kube-system" is protected`; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
