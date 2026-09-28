@@ -4,27 +4,14 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1"
 )
-
-// Reconciler carries everything one reconcile pass needs. It holds client
-// interfaces rather than concrete clients, so both fakes drive it directly.
-type Reconciler struct {
-	Kube      kubernetes.Interface
-	Dyn       dynamic.Interface
-	Protected map[string]bool
-	Timeout   time.Duration
-	Now       func() time.Time
-}
 
 // rejection is a precondition failure. Retrying will not help until the cluster
 // or the spec changes, so it becomes a Rejected status rather than a requeue.
