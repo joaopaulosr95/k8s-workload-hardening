@@ -6,6 +6,14 @@ description: |
   Undo is specified in full; the other four are scoping notes.
 author: João Bastos <joaopaulosr95@gmail.com>
 status: Draft
+# Flip to Approved once all five items have landed. 001 and 002 are Approved;
+# this one stays Draft while any of its five is unbuilt, so the status answers
+# "is this spec describing shipped behaviour?" rather than "has anyone read it".
+#   [x] Refactor            — specs/003-bonus/refactor/tasks.md, merged
+#   [ ] Undo                — specs/003-bonus/undo/tasks.md
+#   [ ] Integration tests   — specs/003-bonus/integration-tests/tasks.md
+#   [ ] Metrics endpoint    — specs/003-bonus/metrics/tasks.md
+#   [ ] Documentation       — specs/003-bonus/docs/tasks.md
 relatedResources:
   - docs/assignment.md
   - specs/001-network-isolation/spec.md
