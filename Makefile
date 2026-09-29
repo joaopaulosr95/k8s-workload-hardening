@@ -1,6 +1,12 @@
 TAG ?= dev
 IMAGE ?= ghcr.io/joaopaulosr95/k8s-workload-hardening
 CLUSTER ?= hardening
+# Every kubectl call below is pinned to one context. Unpinned, `make verify`
+# runs against whatever kubeconfig happens to be selected — and it deletes
+# namespaces, patches live workloads and restarts a Deployment. Override for a
+# cluster under another name.
+KUBECONTEXT ?= kind-$(CLUSTER)
+KUBECTL = kubectl --context=$(KUBECONTEXT)
 
 .PHONY: test cover image kind-up kind-down deploy \
         samples-isolation verify-isolation verify-crd-isolation \
@@ -30,18 +36,18 @@ kind-down:
 
 deploy: image
 	kind load docker-image $(IMAGE):$(TAG) --name $(CLUSTER)
-	kubectl apply -f deploy/crd.yaml
-	kubectl apply -f deploy/crd-hardening.yaml
-	kubectl apply -f deploy/rbac.yaml
-	kubectl apply -f deploy/controller.yaml
-	kubectl -n isolation-system rollout restart deployment/network-isolation
-	kubectl -n isolation-system rollout status deployment/network-isolation --timeout=120s
+	$(KUBECTL) apply -f deploy/crd.yaml
+	$(KUBECTL) apply -f deploy/crd-hardening.yaml
+	$(KUBECTL) apply -f deploy/rbac.yaml
+	$(KUBECTL) apply -f deploy/controller.yaml
+	$(KUBECTL) -n isolation-system rollout restart deployment/network-isolation
+	$(KUBECTL) -n isolation-system rollout status deployment/network-isolation --timeout=120s
 
 samples-isolation:
-	kubectl apply -f deploy/samples/workloads.yaml
-	kubectl -n tenant-a wait --for=condition=Ready pod/gateway --timeout=120s
-	kubectl -n tenant-b wait --for=condition=Ready pod/dashboard --timeout=120s
-	kubectl -n tenant-c wait --for=condition=Ready pod/bystander --timeout=120s
+	$(KUBECTL) apply -f deploy/samples/workloads.yaml
+	$(KUBECTL) -n tenant-a wait --for=condition=Ready pod/gateway --timeout=120s
+	$(KUBECTL) -n tenant-b wait --for=condition=Ready pod/dashboard --timeout=120s
+	$(KUBECTL) -n tenant-c wait --for=condition=Ready pod/bystander --timeout=120s
 
 verify-isolation: deploy samples-isolation
 	./hack/verify-isolation.sh
@@ -53,13 +59,13 @@ samples-hardening:
 	# From a clean slate: the tool's own annotations and patches survive a
 	# re-apply, and verify-hardening asserts that a preview has written
 	# nothing yet, so a second run would read the first run's results.
-	kubectl delete namespace harden-a harden-b --ignore-not-found --wait
-	kubectl apply -f deploy/samples/workloads-hardening.yaml
-	kubectl -n harden-a rollout status deployment/fill-me --timeout=120s
-	kubectl -n harden-a rollout status deployment/nonroot --timeout=120s
-	kubectl -n harden-a rollout status deployment/already-hardened --timeout=120s
-	kubectl -n harden-a rollout status deployment/skip-me --timeout=120s
-	kubectl -n harden-b rollout status deployment/covered --timeout=120s
+	$(KUBECTL) delete namespace harden-a harden-b --ignore-not-found --wait
+	$(KUBECTL) apply -f deploy/samples/workloads-hardening.yaml
+	$(KUBECTL) -n harden-a rollout status deployment/fill-me --timeout=120s
+	$(KUBECTL) -n harden-a rollout status deployment/nonroot --timeout=120s
+	$(KUBECTL) -n harden-a rollout status deployment/already-hardened --timeout=120s
+	$(KUBECTL) -n harden-a rollout status deployment/skip-me --timeout=120s
+	$(KUBECTL) -n harden-b rollout status deployment/covered --timeout=120s
 
 verify-hardening: deploy samples-hardening
 	./hack/verify-hardening.sh

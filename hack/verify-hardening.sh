@@ -7,6 +7,18 @@
 # untouched; and the provenance annotation is correct.
 set -euo pipefail
 
+# Every kubectl call below is pinned to one context. Unpinned, this script runs
+# against whatever kubeconfig happens to be selected — and it deletes namespaces
+# and patches live workloads, so a stale context turns a verification run into an
+# incident. Override with KUBECONTEXT=... for a cluster under another name.
+CONTEXT="${KUBECONTEXT:-kind-hardening}"
+kubectl() { command kubectl --context="$CONTEXT" "$@"; }
+
+if ! command kubectl config get-contexts "$CONTEXT" >/dev/null 2>&1; then
+  echo "no kubecontext named '$CONTEXT'; set KUBECONTEXT or run 'make kind-up'" >&2
+  exit 1
+fi
+
 request=deploy/samples/hardening.yaml
 ns=isolation-system
 name=tenant-hardening
