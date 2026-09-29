@@ -87,7 +87,16 @@ func (r *HardeningReconciler) preview(
 // two requests naming the same namespace never share an acceptance (G-03
 // permits two such objects).
 func cacheKey(w *v1alpha1.WorkloadHardening, ref plan.Target) string {
-	return string(w.UID) + "|" + ref.String()
+	return requestPrefix(w.Namespace, w.Name) + string(w.UID) + "|" + ref.String()
+}
+
+// requestPrefix is the part of a cache key that identifies the request without
+// its UID, so entries can be dropped for an object that is already gone — on a
+// delete the UID is gone with it. The UID still scopes the key itself: a
+// recreated object with the same name gets fresh entries rather than inheriting
+// acceptances taken against its predecessor.
+func requestPrefix(namespace, name string) string {
+	return namespace + "/" + name + "|"
 }
 
 // cached reports whether this exact change was dry-run cleanly earlier.
@@ -115,6 +124,37 @@ func (r *HardeningReconciler) forget(w *v1alpha1.WorkloadHardening, ref plan.Tar
 	delete(r.verified, cacheKey(w, ref))
 }
 
+// retain drops every acceptance for this request except the targets the pass
+// just saw. Nothing else removes an entry, so without it a deleted target — or
+// one that dropped out of the plan because it now has no gaps — leaves a key
+// behind for the lifetime of the process.
+func (r *HardeningReconciler) retain(w *v1alpha1.WorkloadHardening, refs []plan.Target) {
+	keep := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		keep[cacheKey(w, ref)] = true
+	}
+	prefix := requestPrefix(w.Namespace, w.Name) + string(w.UID) + "|"
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.verified {
+		if strings.HasPrefix(key, prefix) && !keep[key] {
+			delete(r.verified, key)
+		}
+	}
+}
+
+// discard drops every acceptance for a request that no longer exists.
+func (r *HardeningReconciler) discard(namespace, name string) {
+	prefix := requestPrefix(namespace, name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.verified {
+		if strings.HasPrefix(key, prefix) {
+			delete(r.verified, key)
+		}
+	}
+}
+
 // apply patches a target whose own change hash the operator approved (BR-07).
 //
 // Each target is decided on its own hash, never on a plan-wide one. A single
@@ -129,13 +169,16 @@ func (r *HardeningReconciler) apply(
 	body []byte,
 	row v1alpha1.TargetStatus,
 ) v1alpha1.TargetStatus {
+	approved, wasApproved := approvedEarlier(w, t.Ref)
 	switch {
 	case w.Approved(row.Hash):
 		// Patched below.
-	case approvedEarlier(w, t.Ref):
+	case wasApproved:
 		// The operator approved a hash for this target, and it no longer
-		// describes it. Publish the new one for re-approval (BR-07).
+		// describes it. Publish the new one for re-approval, and keep the
+		// approved one so the attribution outlives this pass (BR-07).
 		row.Outcome = v1alpha1.OutcomeStale
+		row.ApprovedHash = approved
 		row.Reason = "the approved change no longer describes this target; re-approve " + row.Hash
 		logger.Info("Stale", "target", t.Ref.String(), "hash", row.Hash)
 		return row
@@ -189,13 +232,21 @@ func (r *HardeningReconciler) apply(
 // elsewhere, or a cleared status — this returns false and the target reports
 // Unapproved. BR-07 sanctions that degradation and bounds it to the label: the
 // phase turns on unmatched hashes (FR-06), which need no history.
-func approvedEarlier(w *v1alpha1.WorkloadHardening, ref plan.Target) bool {
+func approvedEarlier(w *v1alpha1.WorkloadHardening, ref plan.Target) (string, bool) {
 	for _, row := range w.Status.Plan {
-		if row.Namespace == ref.Namespace && row.Kind == ref.Kind && row.Name == ref.Name {
-			return w.Approved(row.Hash)
+		if row.Namespace != ref.Namespace || row.Kind != ref.Kind || row.Name != ref.Name {
+			continue
 		}
+		// On the pass that first notices the target has moved, the approved
+		// hash is the one that row published. From then on the row carries it
+		// explicitly, because what it publishes is the new hash.
+		approved := row.Hash
+		if row.ApprovedHash != "" {
+			approved = row.ApprovedHash
+		}
+		return approved, w.Approved(approved)
 	}
-	return false
+	return "", false
 }
 
 // rowKey orders and identifies a plan row: namespace, kind, name — the same
@@ -306,17 +357,15 @@ func phaseFor(w *v1alpha1.WorkloadHardening, rows []v1alpha1.TargetStatus) (v1al
 		return v1alpha1.PhasePartiallyApplied, fmt.Sprintf(
 			"%d patched; %d of the %d approved hashes matches no target with gaps",
 			patched, dangling, len(w.Spec.ApprovedPlan))
-	case patched > 0:
+	default:
 		// Unapproved is not a failure. An object whose approved targets all
 		// patched is Applied however many targets it left alone (FR-06).
+		//
+		// This is the default rather than a `patched > 0` case because the
+		// alternative cannot arise: reaching here means every approved hash
+		// matched a row, and a row whose hash is approved leaves apply() as
+		// Patched or Failed — both of which the cases above have already
+		// caught. Refused targets are findings and never produce rows at all.
 		return v1alpha1.PhaseApplied, fmt.Sprintf("%d patched, %d left unapproved", patched, unapproved)
-	default:
-		// Armed, nothing approved is missing, and nothing was patched: every
-		// approved hash names a row the plan still reports but cannot act on —
-		// a refused target (BR-04), for instance. Non-terminal, so it recovers
-		// by itself if the refusal clears.
-		return v1alpha1.PhasePartiallyApplied, fmt.Sprintf(
-			"%d approved hashes matched no patchable target; %d targets are unapproved",
-			len(w.Spec.ApprovedPlan), unapproved)
 	}
 }

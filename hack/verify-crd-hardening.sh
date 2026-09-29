@@ -107,6 +107,20 @@ spec:
     limits: {cpu: 500m, memory: 1Gi}
 EOF
 
+# maxProperties: 0 rejects any key inside limits but admits an empty object, so
+# the CEL rule is what closes it. Without both, "limits are never written" is
+# a claim the schema only half enforces.
+expect_reject "an empty resources.limits" "limits is not supported" <<EOF
+apiVersion: hardening.acme.corp/v1alpha1
+kind: WorkloadHardening
+metadata: { name: empty-limits, namespace: $ns }
+spec:
+  namespaces: [tenant-a]
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: {}
+EOF
+
 # Review Focus 6, at the API-server level: the loose regular expression that
 # ParseQuantity quotes in its error message accepts "10mm", and the Go
 # conversion then cannot read it. The tight grammar in the schema must refuse

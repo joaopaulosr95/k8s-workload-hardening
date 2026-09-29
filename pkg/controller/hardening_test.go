@@ -1203,3 +1203,205 @@ func TestApplyDoesNotWriteWhenTheDryRunIsRefused(t *testing.T) {
 		t.Errorf("phase = %q, want PartiallyApplied", got.Status.Phase)
 	}
 }
+
+// Stale is the attribution — which target your approval used to describe — and
+// it has to survive the pass that reports it. The controller reads its own
+// previously published plan to draw the Stale/Unapproved distinction, so a row
+// that published only the *new* hash destroys the record on the very write that
+// reported it: one resync later the operator sees "you never approved this"
+// instead of "re-approve <hash>" (BR-07).
+func TestStaleSurvivesLaterResyncs(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	approved := rowFor(storedHardening(t, r, w), "Deployment", "api").Hash
+	arm(t, r, w, approved)
+
+	d := storedTemplate(t, r, "tenant-a", "api")
+	d.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("50m"),
+	}
+	if _, err := r.Kube.AppsV1().Deployments("tenant-a").Update(context.Background(), d, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("editing api: %v", err)
+	}
+
+	// First armed pass: Stale, as TestStaleApprovalHoldsPartiallyApplied pins.
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// Two more resyncs, nothing else changing. The approval is untouched, so
+	// the attribution must not decay.
+	for pass := 2; pass <= 3; pass++ {
+		if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+			t.Fatalf("resync %d: %v", pass, err)
+		}
+		got := storedHardening(t, r, w)
+		api := rowFor(got, "Deployment", "api")
+		if api.Outcome != v1alpha1.OutcomeStale {
+			t.Fatalf("resync %d: outcome = %q, want Stale: the approval has not changed", pass, api.Outcome)
+		}
+		if !strings.Contains(api.Reason, "no longer describes") {
+			t.Errorf("resync %d: reason = %q, want the Stale reason", pass, api.Reason)
+		}
+		if got.Status.Phase != v1alpha1.PhasePartiallyApplied {
+			t.Errorf("resync %d: phase = %q, want PartiallyApplied", pass, got.Status.Phase)
+		}
+	}
+
+	// And re-approving still converges, so the memory has not become a trap.
+	arm(t, r, w, rowFor(storedHardening(t, r, w), "Deployment", "api").Hash)
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("re-approved apply: %v", err)
+	}
+	if got := storedHardening(t, r, w); got.Status.Phase != v1alpha1.PhaseApplied {
+		t.Errorf("phase after re-approval = %q (%s), want Applied", got.Status.Phase, got.Status.Message)
+	}
+}
+
+// FR-06: status is written only when something other than the timestamp
+// changed, so a resync of an unchanged object issues no writes at all. That
+// has to hold for an object stuck on an unreadable spec too — it is precisely
+// the object that will sit there being resynced forever.
+func TestUnreadableSpecIsNotRewrittenOnEveryResync(t *testing.T) {
+	broken := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": v1alpha1.GroupName + "/" + v1alpha1.Version,
+		"kind":       v1alpha1.HardeningKind,
+		"metadata": map[string]any{
+			"name": "tenant-hardening", "namespace": "isolation-system",
+			"uid": hardUID, "generation": int64(4),
+		},
+		"spec": map[string]any{
+			"namespaces": []any{"tenant-a"},
+			"resources":  map[string]any{"requests": map[string]any{"cpu": "10mm", "memory": "32Mi"}},
+		},
+	}}
+
+	r := newHardener(ns("tenant-a"))
+	r.Dyn = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			v1alpha1.Resource:          v1alpha1.Kind + "List",
+			v1alpha1.HardeningResource: v1alpha1.HardeningKind + "List",
+		},
+		broken,
+	)
+	key := "isolation-system/tenant-hardening"
+
+	if err := r.Reconcile(context.Background(), key); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	u, err := r.Dyn.Resource(v1alpha1.HardeningResource).Namespace("isolation-system").
+		Get(context.Background(), "tenant-hardening", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the object back: %v", err)
+	}
+	status, _ := u.Object["status"].(map[string]any)
+	if status == nil || status["phase"] != string(v1alpha1.PhaseRejected) {
+		t.Fatalf("status = %v, want phase Rejected", status)
+	}
+	if got, _, _ := unstructured.NestedInt64(u.Object, "status", "observedGeneration"); got != 4 {
+		t.Errorf("observedGeneration = %d, want 4: the status describes this spec", got)
+	}
+
+	// dynamic/fake's UpdateStatus replaces the whole object, so the status
+	// write above took the stub's empty spec with it and the unreadable spec
+	// is gone. A real API server ignores everything outside status, and the
+	// object stays unreadable — which is the whole point: it is resynced
+	// forever. Put it back, as dryRunGuard and arm's generation bump do for
+	// the other two places these fakes diverge from the API server.
+	u.Object["spec"] = map[string]any{
+		"namespaces": []any{"tenant-a"},
+		"resources":  map[string]any{"requests": map[string]any{"cpu": "10mm", "memory": "32Mi"}},
+	}
+	if _, err := r.Dyn.Resource(v1alpha1.HardeningResource).Namespace("isolation-system").
+		Update(context.Background(), u, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("restoring the unreadable spec: %v", err)
+	}
+
+	r.Dyn.(*dynamicfake.FakeDynamicClient).ClearActions()
+	if err := r.Reconcile(context.Background(), key); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	for _, a := range r.Dyn.(*dynamicfake.FakeDynamicClient).Actions() {
+		switch a.GetVerb() {
+		case "get", "list", "watch":
+		default:
+			t.Errorf("unexpected write on an unchanged resync: %s %s", a.GetVerb(), a.GetSubresource())
+		}
+	}
+}
+
+// The CRD's x-kubernetes-list-type: set is the only thing stopping a duplicate
+// namespace, and the count check above maxNamespaces exists precisely because
+// an object stored before a constraint tightened must not reach the discovery
+// loop. The same argument covers duplicates: discovering a namespace twice
+// doubles every row and every finding it contributes.
+func TestDuplicateNamespacesAreDiscoveredOnce(t *testing.T) {
+	w := hardening("tenant-a", "tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+
+	got := storedHardening(t, r, w)
+	if n := len(got.Status.Plan); n != 1 {
+		t.Errorf("status.plan holds %d rows, want 1: the namespace is named twice, not two namespaces", n)
+	}
+	if n := len(got.Status.Findings); n != 1 {
+		t.Errorf("status.findings holds %d entries, want 1", n)
+	}
+	if n := len(patchActions(t, r)); n != 1 {
+		t.Errorf("issued %d dry-runs, want 1", n)
+	}
+}
+
+// The dry-run cache is keyed by request UID and target, and nothing but a
+// failed dry-run ever removed an entry — so a deleted request, or a target that
+// went away, left a key behind for the lifetime of the process. Preview is the
+// only writer, and it runs on every unarmed pass over every target, so the leak
+// grows with churn rather than with the number of live objects.
+func TestDryRunCacheDoesNotOutliveItsTargets(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"), deployment("tenant-a", "web"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if n := len(r.verified); n != 2 {
+		t.Fatalf("cache holds %d entries after the first pass, want 2", n)
+	}
+
+	// One target goes away.
+	if err := r.Kube.AppsV1().Deployments("tenant-a").Delete(context.Background(), "web", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("deleting web: %v", err)
+	}
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	if n := len(r.verified); n != 1 {
+		t.Errorf("cache holds %d entries, want 1: the deleted target's acceptance is dead weight", n)
+	}
+
+	// And the request itself goes away.
+	if err := r.Dyn.Resource(v1alpha1.HardeningResource).Namespace(w.Namespace).
+		Delete(context.Background(), w.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("deleting the request: %v", err)
+	}
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("pass after deletion: %v", err)
+	}
+	if n := len(r.verified); n != 0 {
+		t.Errorf("cache holds %d entries for a request that no longer exists", n)
+	}
+}

@@ -66,7 +66,7 @@ func (q *fakeQueue) Done(k string)           { q.done = append(q.done, k) }
 // A failed reconcile is retried, never dropped: abandoning a key would leave an
 // isolation request unserved or a cleanup half-finished.
 func TestProcessNextRequeuesOnError(t *testing.T) {
-	key := queueKey("networkisolations", "isolation-system", "gw-dash")
+	key := queueKey("networkisolations", "isolation-system/gw-dash")
 	q := &fakeQueue{items: []string{key}}
 	c := &Controller{queue: q, reconcile: map[string]func(context.Context, string) error{
 		"networkisolations": func(context.Context, string) error { return errors.New("apiserver is down") },
@@ -87,7 +87,7 @@ func TestProcessNextRequeuesOnError(t *testing.T) {
 }
 
 func TestProcessNextForgetsOnSuccess(t *testing.T) {
-	key := queueKey("networkisolations", "isolation-system", "gw-dash")
+	key := queueKey("networkisolations", "isolation-system/gw-dash")
 	q := &fakeQueue{items: []string{key}}
 	c := &Controller{queue: q, reconcile: map[string]func(context.Context, string) error{
 		"networkisolations": func(context.Context, string) error { return nil },
@@ -201,7 +201,7 @@ func TestNewAndRun(t *testing.T) {
 // came from. A bare "namespace/name" would send a WorkloadHardening to the
 // NetworkIsolation reconciler, which would report it NotFound and forget it.
 func TestQueueKeyRoundTrip(t *testing.T) {
-	key := queueKey(v1alpha1.HardeningResource.Resource, "isolation-system", "tenant-hardening")
+	key := queueKey(v1alpha1.HardeningResource.Resource, "isolation-system/tenant-hardening")
 	if key != "workloadhardenings|isolation-system/tenant-hardening" {
 		t.Errorf("queueKey = %q", key)
 	}
@@ -227,8 +227,8 @@ func TestProcessNextRoutesByResource(t *testing.T) {
 	var served []string
 	c := &Controller{
 		queue: &fakeQueue{items: []string{
-			queueKey("networkisolations", "isolation-system", "gw-dash"),
-			queueKey("workloadhardenings", "isolation-system", "tenant-hardening"),
+			queueKey("networkisolations", "isolation-system/gw-dash"),
+			queueKey("workloadhardenings", "isolation-system/tenant-hardening"),
 			"unknownresource|isolation-system/whatever",
 		}},
 		reconcile: map[string]func(context.Context, string) error{

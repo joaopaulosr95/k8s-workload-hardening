@@ -11,6 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
@@ -41,7 +43,10 @@ func (r *HardeningReconciler) Reconcile(ctx context.Context, key string) error {
 	u, err := r.Dyn.Resource(v1alpha1.HardeningResource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		// Gone. With no finalizer there is nothing to undo: the patches and
-		// the provenance annotations stay where they are (FR-05, BR-08).
+		// the provenance annotations stay where they are (FR-05, BR-08). The
+		// dry-run cache is this controller's only per-object state, and it is
+		// dropped here because nothing else would ever look at it again.
+		r.discard(namespace, name)
 		return nil
 	}
 	if err != nil {
@@ -62,6 +67,16 @@ func (r *HardeningReconciler) Reconcile(ctx context.Context, key string) error {
 		stub.SetNamespace(u.GetNamespace())
 		stub.SetUID(u.GetUID())
 		stub.SetResourceVersion(u.GetResourceVersion())
+		stub.SetGeneration(u.GetGeneration())
+		// The status that is already stored, so setHardeningStatus can see
+		// that nothing changed and write nothing. An object stuck here is
+		// resynced forever, and FR-06 says an unchanged resync issues no
+		// writes at all. status is the one part of this object that does
+		// convert; if it somehow does not, the zero value simply means the
+		// next write goes ahead.
+		if stored, found, err := unstructured.NestedMap(u.Object, "status"); err == nil && found {
+			_ = runtime.DefaultUnstructuredConverter.FromUnstructured(stored, &stub.Status)
+		}
 		// Written through the status subresource, which ignores everything
 		// outside status — so the stub's empty spec never reaches etcd.
 		return r.setHardeningStatus(ctx, stub, v1alpha1.HardeningStatus{
@@ -110,12 +125,15 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 	var (
 		rows     []v1alpha1.TargetStatus
 		findings []v1alpha1.Finding
+		// seen is every target this pass planned a change for, and is what the
+		// dry-run cache is pruned against below.
+		seen []plan.Target
 	)
 
 	// Namespaces in sorted order, and targets within a namespace in
 	// kind-then-name order, so a retry resumes predictably and the log reads
 	// in the same order as the preview (FR-04).
-	for _, namespace := range slices.Sorted(slices.Values(w.Spec.Namespaces)) {
+	for _, namespace := range namespaces(w) {
 		targets, namespaceFindings, err := r.discover(ctx, namespace)
 		if err != nil {
 			return r.reportFailure(ctx, logger, w, err)
@@ -142,6 +160,7 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 				continue
 			}
 
+			seen = append(seen, target.Ref)
 			rows = append(rows, r.execute(ctx, logger, w, target, p.Changes, v1alpha1.TargetStatus{
 				Namespace: target.Ref.Namespace,
 				Kind:      target.Ref.Kind,
@@ -153,6 +172,12 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 			}))
 		}
 	}
+
+	// Every acceptance for a target this pass did not plan is dead weight: the
+	// target is gone, excluded, or has no gaps left. Pruned after the loop so
+	// a namespace that failed to list — which returns above — never looks like
+	// a namespace with no targets.
+	r.retain(w, seen)
 
 	rows = carry(w.Status.Plan, rows)
 	phase, message := phaseFor(w, rows)
@@ -194,6 +219,15 @@ func (r *HardeningReconciler) reportFailure(ctx context.Context, logger klog.Log
 	return cause
 }
 
+// namespaces returns the named namespaces, sorted and deduplicated. Sorted so
+// a retry resumes predictably and the log reads in the same order as the
+// preview (FR-04); deduplicated because the CRD's list-type: set is the only
+// other guard, and an object stored before that constraint would otherwise
+// contribute every row and every finding of the repeated namespace twice.
+func namespaces(w *v1alpha1.WorkloadHardening) []string {
+	return slices.Compact(slices.Sorted(slices.Values(w.Spec.Namespaces)))
+}
+
 // validate checks every precondition that can refuse the whole object before a
 // single target is read.
 //
@@ -227,7 +261,7 @@ func (r *HardeningReconciler) validate(ctx context.Context, w *v1alpha1.Workload
 	}
 
 	policies := map[string]plan.Policy{}
-	for _, namespace := range slices.Sorted(slices.Values(w.Spec.Namespaces)) {
+	for _, namespace := range namespaces(w) {
 		if _, err := r.Kube.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{}); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil, reject("namespace %q does not exist", namespace)
@@ -264,6 +298,10 @@ func (r *HardeningReconciler) setHardeningStatus(ctx context.Context, w *v1alpha
 	// it — otherwise an approval edit that turns out to be a no-op would leave
 	// the object re-evaluating itself forever.
 	want.ObservedGeneration = w.Generation
+	// Derived rather than passed in, so no caller can publish a count that
+	// disagrees with the spec it describes.
+	want.ApprovedCount = len(w.Spec.ApprovedPlan)
+	want.NamespaceCount = len(namespaces(w))
 	want.LastReconcileTime = w.Status.LastReconcileTime
 	if equality.Semantic.DeepEqual(w.Status, want) {
 		return nil

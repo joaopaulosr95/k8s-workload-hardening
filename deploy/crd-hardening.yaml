@@ -20,12 +20,15 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        # Counts, not the arrays themselves: a string column over a list
+        # renders as <none>, and an indexed one silently shows the first entry
+        # of several, which is worse. The names and hashes are in the object.
         - name: Namespaces
-          type: string
-          jsonPath: .spec.namespaces
+          type: integer
+          jsonPath: .status.namespaceCount
         - name: Approved
-          type: string
-          jsonPath: .spec.approvedPlan
+          type: integer
+          jsonPath: .status.approvedCount
         - name: Message
           type: string
           jsonPath: .status.message
@@ -75,6 +78,16 @@ spec:
                 resources:
                   type: object
                   required: [requests]
+                  x-kubernetes-validations:
+                    # maxProperties: 0 below rejects any key inside limits, but
+                    # admits an empty one. CEL can name the field because the
+                    # schema declares it — which is also why it is declared at
+                    # all rather than left to be pruned silently.
+                    - rule: "!has(self.limits)"
+                      message: >-
+                        spec.resources.limits is not supported: limits are
+                        never written, add a LimitRange to the namespace
+                        instead (BR-03, D-07)
                   properties:
                     requests:
                       type: object
@@ -140,11 +153,26 @@ spec:
                       kind: { type: string }
                       name: { type: string }
                       hash: { type: string }
+                      # The hash the operator approved, kept on a Stale row so
+                      # the attribution survives later resyncs (BR-07).
+                      approvedHash: { type: string }
                       fields:
                         type: array
                         items: { type: string }
                       pods: { type: integer }
-                      rollout: { type: string }
+                      rollout:
+                        type: string
+                        description: >-
+                          How this target rolls the patch out, and what it
+                          costs if the patched pods never become Ready. A
+                          Deployment surges — new pods are created first, and
+                          at 3 replicas or fewer under the defaults every old
+                          pod keeps serving. Recreate takes every pod down
+                          before replacing any. A StatefulSet terminates each
+                          pod before creating its replacement, so at 1 replica
+                          the workload is down until reverted. A DaemonSet
+                          deletes before creating per node, and the rollout
+                          halts after one node.
                       outcome: { type: string }
                       reason: { type: string }
                 findings:
@@ -162,6 +190,12 @@ spec:
                 # terminal only while it matches metadata.generation, because
                 # approvedPlan is the only mutable field and an edit to it must
                 # be acted on (FR-05).
+                # Published so `kubectl get wh` can show how much of the plan
+                # has been approved without printing every hash.
+                approvedCount:
+                  type: integer
+                namespaceCount:
+                  type: integer
                 observedGeneration:
                   type: integer
                   format: int64

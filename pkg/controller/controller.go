@@ -30,7 +30,7 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting controller")
-	defer logger.Info("Stopping NetworkIsolation controller")
+	defer logger.Info("Stopping controller")
 
 	for _, start := range c.start {
 		start(ctx.Done())
@@ -74,8 +74,8 @@ type Controller struct {
 }
 
 // queueKey namespaces a work item by the resource it came from.
-func queueKey(resource, namespace, name string) string {
-	return resource + "|" + namespace + "/" + name
+func queueKey(resource, object string) string {
+	return resource + "|" + object
 }
 
 // splitQueueKey undoes queueKey.
@@ -181,7 +181,7 @@ func (c *Controller) enqueue(resource string, obj any) {
 		runtime.HandleError(err)
 		return
 	}
-	c.queue.Add(resource + "|" + key)
+	c.queue.Add(queueKey(resource, key))
 }
 
 // enqueuePolicy maps a policy event back to the NetworkIsolation that owns it.
@@ -196,6 +196,6 @@ func (c *Controller) enqueuePolicy(obj any) {
 		return
 	}
 	if key, ok := ownerKey(meta); ok {
-		c.queue.Add(v1alpha1.Resource.Resource + "|" + key)
+		c.queue.Add(queueKey(v1alpha1.Resource.Resource, key))
 	}
 }

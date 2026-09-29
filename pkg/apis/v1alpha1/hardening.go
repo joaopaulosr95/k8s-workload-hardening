@@ -93,15 +93,21 @@ type HardeningSpec struct {
 // Pods carries no omitempty: zero is an observation and is reported
 // explicitly, as in 001.
 type TargetStatus struct {
-	Namespace string   `json:"namespace"`
-	Kind      string   `json:"kind"`
-	Name      string   `json:"name"`
-	Hash      string   `json:"hash"`
-	Fields    []string `json:"fields,omitempty"`
-	Pods      int      `json:"pods"`
-	Rollout   string   `json:"rollout,omitempty"`
-	Outcome   string   `json:"outcome"`
-	Reason    string   `json:"reason,omitempty"`
+	Namespace string `json:"namespace"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Hash      string `json:"hash"`
+	// ApprovedHash is the hash the operator approved for this target, carried
+	// on a Stale row. Without it the Stale attribution would last exactly one
+	// pass: the distinction is drawn from the plan the controller previously
+	// published, and that row carries the *new* hash, so the next resync would
+	// find nothing approved and report Unapproved instead (BR-07).
+	ApprovedHash string   `json:"approvedHash,omitempty"`
+	Fields       []string `json:"fields,omitempty"`
+	Pods         int      `json:"pods"`
+	Rollout      string   `json:"rollout,omitempty"`
+	Outcome      string   `json:"outcome"`
+	Reason       string   `json:"reason,omitempty"`
 }
 
 // Finding is something observed and reported but not patched, with the reason.
@@ -123,6 +129,14 @@ type HardeningStatus struct {
 	Message  string         `json:"message,omitempty"`
 	Plan     []TargetStatus `json:"plan,omitempty"`
 	Findings []Finding      `json:"findings,omitempty"`
+	// ApprovedCount is how many hashes spec.approvedPlan holds. Published so
+	// a printer column can show it: a column over the array itself renders as
+	// <none>, and the hashes are too long to list in a table anyway.
+	ApprovedCount int `json:"approvedCount,omitempty"`
+	// NamespaceCount is how many namespaces spec.namespaces names, published
+	// for the same reason: the blast radius should be visible in a list view,
+	// and an indexed column over the array would show the first of several.
+	NamespaceCount int `json:"namespaceCount,omitempty"`
 	// ObservedGeneration is the metadata.generation of the spec this status
 	// describes. Applied is terminal only while it matches, because
 	// approvedPlan is the only mutable field: a generation ahead of this one

@@ -57,11 +57,15 @@ type HardeningReconciler struct {
 // the whole point of the field is that the operator accepting the restart can
 // see what it costs for *this* workload, and a Deployment set to Recreate
 // takes every pod down at once — the inverse of the surge text below.
+// Each is a short mechanism plus the numbers that bound it. The prose spelling
+// out what each one costs lives in the CRD's field description and the README:
+// status carries one of these per target, and a namespace of several hundred
+// workloads should not spend its object size limit on a repeated paragraph.
 const (
-	rolloutDeployment  = "RollingUpdate: maxSurge 25% rounds up, maxUnavailable 25% rounds down; new pods are created first, and at 3 replicas or fewer every old pod keeps serving"
-	rolloutRecreate    = "Recreate: every pod is terminated before any replacement is created, so the whole workload is down until the new pods are Ready"
-	rolloutStatefulSet = "RollingUpdate: reverse ordinal, one pod at a time, terminate-then-create, no surge; at 1 replica the workload is down until reverted"
-	rolloutDaemonSet   = "RollingUpdate: maxUnavailable 1, maxSurge 0, delete-then-create per node; the rollout halts after one node"
+	rolloutDeployment  = "RollingUpdate: maxSurge 25%, maxUnavailable 25% (defaults)"
+	rolloutRecreate    = "Recreate: all pods down, then replaced"
+	rolloutStatefulSet = "RollingUpdate: reverse ordinal, one at a time, no surge"
+	rolloutDaemonSet   = "RollingUpdate: maxUnavailable 1, maxSurge 0 (defaults), per node"
 )
 
 // deploymentRollout describes how this Deployment in particular rolls out.
@@ -73,8 +77,7 @@ func deploymentRollout(d *appsv1.Deployment) string {
 	if ru == nil || (ru.MaxSurge == nil && ru.MaxUnavailable == nil) {
 		return rolloutDeployment
 	}
-	return fmt.Sprintf(
-		"RollingUpdate: maxSurge %s, maxUnavailable %s, as configured on this workload; new pods are created first",
+	return fmt.Sprintf("RollingUpdate: maxSurge %s, maxUnavailable %s",
 		orDefault(ru.MaxSurge, "25%"), orDefault(ru.MaxUnavailable, "25%"))
 }
 
@@ -85,8 +88,7 @@ func daemonSetRollout(d *appsv1.DaemonSet) string {
 	if ru == nil || (ru.MaxSurge == nil && ru.MaxUnavailable == nil) {
 		return rolloutDaemonSet
 	}
-	return fmt.Sprintf(
-		"RollingUpdate: maxUnavailable %s, maxSurge %s, as configured on this workload; per node",
+	return fmt.Sprintf("RollingUpdate: maxUnavailable %s, maxSurge %s, per node",
 		orDefault(ru.MaxUnavailable, "1"), orDefault(ru.MaxSurge, "0"))
 }
 
@@ -103,6 +105,18 @@ func orDefault(v *intstr.IntOrString, fallback string) string {
 	}
 	return v.String()
 }
+
+// fromCache asks the API server to serve a list from its watch cache rather
+// than from a quorum read. It is used only for the lists that exist to produce
+// findings — pods, jobs, cronjobs, replicasets — where a slightly stale answer
+// is still a true observation and the next resync corrects it. The workload
+// lists that decide what gets patched keep their strong reads: a patch is
+// written against what the list returned, and that must not be stale.
+//
+// It matters because discovery runs per namespace on every resync of every
+// non-terminal object, and the pod list in particular walks every pod in the
+// namespace purely to report the bare ones.
+var fromCache = metav1.ListOptions{ResourceVersion: "0"}
 
 // Refusal reasons. Each is distinct, because "refused" without the cause tells
 // an operator nothing about which knob to turn (AC-07).
@@ -228,7 +242,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 		})
 	}
 
-	replicaSets, err := apps.ReplicaSets(namespace).List(ctx, metav1.ListOptions{})
+	replicaSets, err := apps.ReplicaSets(namespace).List(ctx, fromCache)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -241,7 +255,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 		report("ReplicaSet", rs.Name, "a standalone ReplicaSet is out of scope: rare enough not to justify a fourth code path (D-08)")
 	}
 
-	jobs, err := r.Kube.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
+	jobs, err := r.Kube.BatchV1().Jobs(namespace).List(ctx, fromCache)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -261,7 +275,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 	// Reported in their own right, not through the Jobs they own: a CronJob
 	// between schedules owns no Job, and BR-04 requires findings to be
 	// enumerated whether or not they can be acted on.
-	crons, err := r.Kube.BatchV1().CronJobs(namespace).List(ctx, metav1.ListOptions{})
+	crons, err := r.Kube.BatchV1().CronJobs(namespace).List(ctx, fromCache)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -270,7 +284,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 			"a CronJob needs a second template path and has no rollout net at all — a broken one simply fails on its next schedule (D-08)")
 	}
 
-	pods, err := r.Kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	pods, err := r.Kube.CoreV1().Pods(namespace).List(ctx, fromCache)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -43,12 +43,14 @@ findings=$(kubectl -n "$ns" get workloadhardening "$name" -o jsonpath='{range .s
 echo "$plan"
 
 # Nothing may have been written yet: a preview writes nothing (AC-08).
+untouched=0
 for d in harden-a/fill-me harden-a/nonroot harden-a/already-hardened harden-a/skip-me harden-b/covered; do
   if [ -n "$(filled "${d%%/*}" "${d##*/}")" ]; then
     bad "preview wrote a provenance annotation onto $d"
+    untouched=1
   fi
 done
-ok "preview wrote nothing"
+[ "$untouched" -eq 0 ] && ok "preview wrote nothing"
 
 # The plan must name the three targets with gaps and neither of the two without.
 contains "fill-me is planned"          "$plan" "harden-a/Deployment/fill-me"
@@ -64,7 +66,14 @@ contains "the skip annotation is reported"              "$findings" "hardening.a
 
 echo
 echo "== approve by hash =="
-hashes=$(kubectl -n "$ns" get workloadhardening "$name" -o jsonpath='{range .status.plan[*]}{.hash}{"\n"}{end}' | grep -v '^$')
+# grep exits 1 on no match, which under `set -e` would abort here with no
+# message at all — an empty plan is a failure to report, not a reason to stop.
+hashes=$(kubectl -n "$ns" get workloadhardening "$name" -o jsonpath='{range .status.plan[*]}{.hash}{"\n"}{end}' | grep -v '^$' || true)
+if [ -z "$hashes" ]; then
+  bad "the plan published no hashes, so there is nothing to approve"
+  echo "AC-15 FAILED"
+  exit 1
+fi
 list=$(printf '%s' "$hashes" | sed 's/.*/"&"/' | paste -sd, -)
 kubectl -n "$ns" patch workloadhardening "$name" --type=merge -p "{\"spec\":{\"approvedPlan\":[$list]}}" >/dev/null
 kubectl -n "$ns" wait --for=jsonpath='{.status.phase}'=Applied "workloadhardening/$name" --timeout=120s >/dev/null
