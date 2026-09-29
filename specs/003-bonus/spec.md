@@ -483,10 +483,21 @@ stays held out of hardening (BR-U09), and deleting it is what releases them (BR-
 
 ### FR-U02 — The inverse plan
 
-A pure function, `plan.Invert(pod *corev1.PodSpec, provenance string, req Request) → Plan`,
-returning the same `Plan` type: deletions in `Changes`, everything skipped in `Findings`. It
+```go
+func Invert(pod *corev1.PodSpec, provenance string, req Request) (Plan, string)
+```
+
+A pure function, returning deletions in `Changes`, everything skipped in `Findings`, and the value
+the provenance annotation should carry afterwards — `""` when nothing survives and the annotation
+is removed entirely. It
 parses the annotation, compares each record against the live template (BR-U02), maps records to
 deletion paths (BR-U03), and drops what admission gates (BR-U04).
+
+**The second result is load-bearing, not decoration.** BR-U05 rewrites the annotation in the same
+request as the deletions; `Plan` carries only `Changes` and `Findings`; and a `Finding` has no
+path. So the records that survived cannot be recovered from what `Plan` holds. The alternative is
+the controller reverse-mapping deletion paths back to records through BR-U03's table — which is
+this function's job, and reading a leaf back out of `securityContext.seccompProfile` is guessing.
 
 `Request` is `plan.Policy` under the name the refactor above gives it: the per-namespace value
 `HardeningReconciler.validate` already builds, today carrying `Coverage` from the namespace's
@@ -571,7 +582,13 @@ FR-06's phases unchanged — `Pending`, `Rejected`, `Previewed`, `Applied`, `Par
 because the phase describes the disposition of the **request**, not the direction of the change,
 and sharing the vocabulary shares the rendering code. The per-target outcome replaces `Patched`
 with **`Reverted`**, which is the one place the direction is visible and the one place a wrong
-word would mislead.
+word would mislead, and adds **`Held`** for a selected workload carrying no record.
+
+`Held` exists because BR-U09's bypass is wider than the revert: such a workload is held, so it
+needs a row, and a row needs an outcome. `Outcome` carries no `omitempty`, so leaving it blank
+would serialise as an empty string and read as a fault — 002's own `Planned` decision, one
+feature along. The CRD declares `outcome` as a free string, so this costs vocabulary and no
+schema change.
 
 An undo whose **revert** plan is empty is `Applied`, not `Previewed`: there is nothing to
 approve and the request is complete. It still holds its selected set (BR-U09), and deleting it
@@ -741,9 +758,30 @@ The actual gap is 002's G-06, and it is narrower than "write integration tests":
    into one workflow on a kind cluster. This is the whole of the bonus for 001 and 002.
 2. **`hack/verify-undo.sh`**, covering AC-U04, AC-U05, AC-U08 and AC-U11 — the criteria a fake
    client cannot reach, because it runs neither admission plugin nor the Deployment controller.
-   AC-U12 belongs with the other CRD checks, in `hack/verify-crd-undo.sh`.
+   AC-U12 is covered by envtest below rather than by a third CRD script.
 3. **envtest** for the CEL transition rules and the structural schemas of all three CRDs, which
    the scripts cover only as far as `kubectl apply` reports.
+
+   **NFR-01 is waived a second time, for `sigs.k8s.io/controller-runtime`.** The schemas and the
+   transition rules are the part of this project with no Go test at all, and they are what an
+   operator's `kubectl apply` meets first. The failure that argues loudest for this is specific:
+   a CEL transition rule that *errors* rather than refuses — which is what an unguarded copy of
+   002's rule does against an optional `workloadSelector` — rejects every update including the
+   one that arms the object, and reads as a broken CRD rather than a wrong rule. Nothing catches
+   that until something applies the right object in the right order, and a Go test that runs on
+   every pull request is a better place for it than a cluster job.
+
+   It **subsumes** the `hack/verify-crd-undo.sh` named above rather than joining it: one
+   mechanism per question. `hack/verify-crd-isolation.sh` and `hack/verify-crd-hardening.sh` stay
+   as they are — written, passing, and asserting the installed-and-served path rather than the
+   schema — but no third script is added, and the cases envtest covers for the first two are
+   ported from them rather than invented.
+
+   The control-plane binaries are fetched by `setup-envtest`, which is a build tool run through
+   `go run` at a pinned version and is **not** vendored. The risk that comes with it is named
+   here because it is this item's version of a green script that tested nothing: a suite that
+   skips when the binaries are absent is indistinguishable from one that passed, so CI asserts
+   the suite actually ran.
 
 Rewriting the existing scripts from a fresh test plan would rebuild working code.
 

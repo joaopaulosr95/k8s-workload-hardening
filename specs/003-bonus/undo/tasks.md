@@ -10,7 +10,7 @@
 
 **Spec:** `specs/003-bonus/spec.md` — BR-U01…BR-U11, FR-U01…FR-U06, NFR-U01…NFR-U04, AC-U01…AC-U22, Error cases.
 
-**Depends on:** the refactor plan's Task 3 for `plan.Request`. If it has not run, the argument is `plan.Policy` and nothing else changes — FR-U02 says so explicitly. **Verified by:** the integration-tests plan's Tasks 2 and 3, which own `hack/verify-crd-undo.sh` and `hack/verify-undo.sh` and therefore AC-U03's dry-run half, AC-U04, AC-U05, AC-U08, AC-U11 and AC-U12.
+**Depends on:** the refactor plan's Task 3 for `plan.Request`. If it has not run, the argument is `plan.Policy` and nothing else changes — FR-U02 says so explicitly. **Verified by:** the integration-tests plan's Tasks 2 and 3 — envtest for AC-U12, and `hack/verify-undo.sh` for AC-U03's dry-run half, AC-U04, AC-U05, AC-U08 and AC-U11.
 
 ---
 
@@ -1493,7 +1493,7 @@ In the `Makefile`, add to `deploy`:
 ```
 
 placed with the other two `kubectl apply -f deploy/crd*.yaml` lines. The
-`verify-crd-undo` target and the script it runs belong to the integration-tests plan (its Task 2), which owns every `hack/verify-*.sh`; this task ships the schema, not its assertions.
+schema's rejection cases belong to the integration-tests plan's Task 2, which asserts all three CRDs under envtest; this task ships the schema, not its assertions.
 
 - [ ] **Step 8: Verify the CRD installs and serves**
 
@@ -1504,7 +1504,7 @@ kubectl explain workloadhardeningundo.spec.workloadSelector
 kubectl get crd workloadhardeningundos.hardening.acme.corp -o jsonpath='{.status.acceptedNames.kind}'
 ```
 
-Expected: the CRD applies, `kubectl explain` prints the `workloadSelector` description — which is the reference documentation for that field, so read it as a reader would — and the accepted kind is `WorkloadHardeningUndo`. AC-U12's fifteen rejection cases are the integration-tests plan's Task 2; this step proves the schema is installable, not that it refuses what it should.
+Expected: the CRD applies, `kubectl explain` prints the `workloadSelector` description — which is the reference documentation for that field, so read it as a reader would — and the accepted kind is `WorkloadHardeningUndo`. AC-U12's fifteen rejection cases are the integration-tests plan's Task 2, under envtest; this step proves the schema is installable, not that it refuses what it should.
 
 - [ ] **Step 9: Run the unit suite**
 
@@ -1528,7 +1528,7 @@ has() guard and its CRD says why: all three are always present after
 defaulting. workloadSelector is optional, so an unguarded copy raises a CEL
 runtime error on an object that omits it — and an erroring transition rule
 rejects the update, including the approvedPlan edit that arms it. Four cases in
-the integration-tests plan's verify-crd-undo.sh exist for that.
+the integration-tests plan's envtest suite exist for that.
 
 Two additions to the shared TargetStatus for the holder, and one outcome the
 spec does not name: Held, for a selected workload with no records. AC-U21
@@ -3318,13 +3318,13 @@ The unit half. AC-U03's dry-run clause, AC-U04, AC-U05, AC-U08, AC-U11 and AC-U1
 
 ## Deviations and clarifications to confirm before merging
 
-Per `AGENTS.md`, the Software Engineer may not invent requirements. Items 1–3 need a spec amendment or the user's assent before this plan merges; 4–6 are gaps closed on this plan's own authority and flagged; 7–9 are facts about the tooling.
+Per `AGENTS.md`, the Software Engineer may not invent requirements. Items 1–3 have since been **settled in the spec itself** — FR-U02, FR-U05 and FR-U06 — rather than worked around here. `AGENTS.md` reserves `/specs` for the Spec Architect; those edits were made with the user's explicit consent, as `2b86936` was in 001 and as 002's items 1–6 were. Items 4–6 are gaps closed on this plan's own authority and flagged; 7–9 are facts about the tooling rather than open questions.
 
-1. **`plan.Invert` returns `(Plan, string)`, not `Plan`.** FR-U02 gives the signature as returning `Plan`. BR-U05 needs the records that **survived**, to rewrite the annotation in the same request — and `Plan` carries only `Changes` and `Findings`, while `plan.Finding` has no path field, so the survivors cannot be recovered from it. The second result is the rewritten annotation value, `""` meaning remove the key. The alternative is for the controller to reverse-map deletion paths back to records through BR-U03's table, which is `Invert`'s job and belongs beside it. Task 2.
+1. **RESOLVED IN SPEC — `plan.Invert` returns `(Plan, string)`, not `Plan`.** FR-U02 gave the signature as returning `Plan`. BR-U05 needs the records that **survived**, to rewrite the annotation in the same request — and `Plan` carries only `Changes` and `Findings`, while `plan.Finding` has no path field, so the survivors cannot be recovered from it. The second result is the rewritten annotation value, `""` meaning remove the key. The alternative was for the controller to reverse-map deletion paths back to records through BR-U03's table, which is `Invert`'s job and where reading a leaf back out of `securityContext.seccompProfile` is guessing. FR-U02 now carries the two-result signature in a code block and records why the second result is load-bearing. Task 2 implements it; no behaviour differs from what this plan already described.
 
-2. **A per-target outcome the spec does not name: `Held`.** FR-U06 replaces `Patched` with `Reverted` and says nothing about a workload that is selected but carries no record. AC-U21 requires exactly such a workload to be visibly held, which needs a status row, which needs an outcome — and `Outcome` carries no `omitempty`, so leaving it blank would serialise as an empty string and read as a fault, which is 002's Deviation 2 repeated. The CRD declares `outcome` as a free string, so this costs vocabulary and no schema change. Task 4.
+2. **RESOLVED IN SPEC — a per-target outcome for a workload held but not reverted.** FR-U06 replaced `Patched` with `Reverted` and said nothing about a workload that is selected but carries no record. AC-U21 requires exactly such a workload to be visibly held, which needs a status row, which needs an outcome — and `Outcome` carries no `omitempty`, so leaving it blank would serialise as an empty string and read as a fault, which is 002's Deviation 2 repeated. FR-U06 now names `Held` and gives that reasoning, calling it 002's own `Planned` decision one feature along. The CRD declares `outcome` as a free string, so this cost vocabulary and no schema change. Task 4.
 
-3. **FR-U05's "FR-05 unchanged" cannot be taken literally, and this plan does not.** FR-05 returns from an `Applied` object before it reads anything; BR-U09 requires the hold re-asserted on every resync; AC-U22 tests it. `Applied` becomes terminal for the **revert** — the deletion plan is not recomputed and no `spec.template` is touched again until `approvedPlan` moves — while the hold comparison runs on every pass. This is the spec's own position in BR-U09's prose and its FR-U05 text now matches; it is recorded because it is the one structural difference from 002's reconciler and a reader who skims will assume it is a copy. Task 9, commented at the guard.
+3. **RESOLVED IN SPEC — FR-U05's "FR-05 unchanged" could not be taken literally.** FR-05 returns from an `Applied` object before it reads anything; BR-U09 requires the hold re-asserted on every resync; AC-U22 tests it. `Applied` becomes terminal for the **revert** — the deletion plan is not recomputed and no `spec.template` is touched again until `approvedPlan` moves — while the hold comparison runs on every pass. BR-U09's prose already said so; FR-U05's text now matches it and names this as the one place the undo diverges from FR-05's lifecycle. Recorded here because it is the one structural difference from 002's reconciler and a reader who skims will assume it is a copy. Task 9, commented at the guard.
 
 4. **AC-U13 had no test in any task, and one is added.** The criterion fell between the revert task and the hold task. It is added at Task 9, Step 1, on `TestHardeningAndUndoConverge`'s fixture. The outcome is **stronger** than the criterion asks: once the hold is written, the reverted target is excluded by BR-04 and becomes a *finding*, not an `Unapproved` row, so it is never republished at all. The test asserts the stronger property and says why.
 

@@ -4,7 +4,7 @@
 
 **Goal:** Put the verification that already exists under CI, and add the two scripts that cover what a fake client cannot reach.
 
-**Architecture:** Most of this exists. `hack/verify-isolation.sh` already runs the full NetworkIsolation cycle on a live cluster, and `hack/verify-hardening.sh` and `hack/verify-crd-hardening.sh` already cover AC-15 and AC-16. The gap is that **nothing runs them**: `.github/workflows/` exists and is empty. Task 1 is the whole of the bonus for 001 and 002. Tasks 2 and 3 extend the existing script mechanism — same helpers, same insistence on an expected error substring — to the third CRD and to the undo's five script-only criteria.
+**Architecture:** Most of this exists. `hack/verify-isolation.sh` already runs the full NetworkIsolation cycle on a live cluster, and `hack/verify-hardening.sh` and `hack/verify-crd-hardening.sh` already cover AC-15 and AC-16. The gap is that **nothing runs them**: `.github/workflows/` exists and is empty. Task 1 is the whole of the bonus for 001 and 002. Task 2 brings all three CRDs' schemas and CEL rules under **envtest**, in the fast job and with no cluster — and replaces the third `verify-crd` script rather than joining it. Task 3 extends the existing script mechanism to the undo's five criteria a fake client cannot reach.
 
 **Tech Stack:** GitHub Actions · kind v0.32.0 · kubectl v1.36.2 · bash · GNU make · Go 1.27.1 for the unit job.
 
@@ -16,7 +16,8 @@
 
 ## Global Constraints
 
-- **No dependency changes and no Go code.** This plan writes YAML and bash only.
+- **NFR-01 is waived a second time, for `sigs.k8s.io/controller-runtime`, and for nothing else.** The spec grants it in its integration-tests section. **After adding it, run `go mod vendor` and commit the vendor changes in the same commit.** `setup-envtest` is a build tool run through `go run` at a pinned version: it is never imported, so it does not enter `go.mod`.
+- **Both the tool version and the control-plane version are pinned** in the `Makefile`. `setup-envtest` at HEAD would change the API server under CI without a commit, and a schema that passes on one version and fails on the next is exactly what this suite exists to catch.
 - **The existing scripts are not rewritten.** `hack/verify-isolation.sh`, `hack/verify-hardening.sh` and `hack/verify-crd-hardening.sh` are finished. The only change any of them may receive is a rename, and that belongs to the refactor plan.
 - **Every `expect_reject` asserts a specific error substring.** `hack/verify-crd-hardening.sh` carries the reason in a comment: "without it a manifest that fails to parse, or one rejected for an unrelated reason, reads as a passing test." Task 2 follows it.
 - **The CI cluster name must equal the Makefile's `CLUSTER`.** `kind load docker-image` names the cluster explicitly.
@@ -29,11 +30,12 @@
 
 ## Review Focus
 
-Three conditions, ordered by how likely each is to waste someone's afternoon.
+Four conditions, ordered by how likely each is to waste someone's afternoon.
 
 1. **A CI cluster name that disagrees with the Makefile's.** `kind load docker-image` names the cluster explicitly; a mismatch loads the image into a cluster `kubectl` is not pointing at, and every pod sits in `ErrImageNeverPull` with no error naming the cause. Expected: the two strings are compared in the job that depends on them. → **Task 1, Step 2.**
 2. **A green script that tested nothing.** `hack/verify-undo.sh` passes trivially if the namespaces it needs do not produce the admission conditions it is checking — a missing `enforce` label, or a LimitRange that happens to carry a default. Expected: the run asserts that at least one `BlockedByPodSecurity` and one `BlockedByLimitRange` finding actually appeared. → **Task 3, Step 5.**
-3. **A transition rule that rejects everything rather than only what it should.** An unguarded copy of 002's CEL rule raises a runtime error on a `WorkloadHardeningUndo` with no `workloadSelector`, and an erroring transition rule rejects the update — including the `approvedPlan` edit that arms the object. That reads as "the CRD is broken", not as "the rule is wrong". Expected: two accepts and two rejects pin it. → **Task 2, Step 4.**
+3. **A transition rule that rejects everything rather than only what it should.** An unguarded copy of 002's CEL rule raises a runtime error on a `WorkloadHardeningUndo` with no `workloadSelector`, and an erroring transition rule rejects the update — including the `approvedPlan` edit that arms the object. That reads as "the CRD is broken", not as "the rule is wrong". This is the failure the envtest dependency was waived for, so the task reproduces it deliberately before trusting the suite. → **Task 2, Steps 4 and 7.**
+4. **An envtest suite that skipped rather than passed.** It exits 0 when the control-plane binaries are absent, so `go test ./...` works on a bare machine — and a failed asset fetch in CI then produces the same summary line as a clean run. Expected: CI greps for the skip message and for the `ok` line, and fails on either being wrong. → **Task 2, Steps 7 and 8.**
 
 ---
 
@@ -42,10 +44,12 @@ Three conditions, ordered by how likely each is to waste someone's afternoon.
 | File | Responsibility |
 | --- | --- |
 | `.github/workflows/ci.yml` | **New.** Two jobs: `go vet` plus the unit suite behind the coverage floor, and a kind cluster running `make verify-crd` and `make verify`. Controller logs dumped on failure. |
-| `hack/verify-crd-undo.sh` | **New.** AC-U12 against a real API server: fifteen cases, each asserting a specific error substring. |
+| `test/envtest/suite_test.go` | **New.** One control plane for the package; installs the three CRDs from `deploy/`, so the manifests under test are the ones shipped. |
+| `test/envtest/crd_test.go` | **New.** AC-U12 in full, plus every case ported from the two existing `verify-crd` scripts. Each rejection asserts a specific error substring. |
 | `hack/verify-undo.sh` | **New.** AC-U03's dry-run half, AC-U04, AC-U05, AC-U08 and AC-U11 on a live cluster. |
 | `deploy/samples/workloads-undo.yaml` | **New.** Three namespaces producing both of BR-U04's gates plus a plain one, and the four Deployments they need. |
-| `Makefile` | **Modified.** `verify-crd-undo`, `samples-undo`, `verify-undo`, and both added to the aggregates. |
+| `Makefile` | **Modified.** `envtest-assets` and `test-envtest` with both versions pinned; `samples-undo` and `verify-undo` added to the aggregates. |
+| `.gitignore` | **Modified.** `bin/` — the control-plane binaries are fetched, not committed. |
 
 ---
 
@@ -178,107 +182,387 @@ Expected: both jobs pass. This is the only task in the plan whose deliverable ca
 
 ---
 
-### Task 2: `hack/verify-crd-undo.sh` (G-06 item 3 in practice; AC-U12)
+### Task 2: envtest for all three CRD schemas and CEL rules (G-06 item 3; AC-U12)
 
 **Files:**
-- Create: `hack/verify-crd-undo.sh`
-- Modify: `Makefile`
+- Create: `test/envtest/suite_test.go`
+- Create: `test/envtest/crd_test.go`
+- Modify: `go.mod`, `go.sum`, `vendor/` (regenerated), `.gitignore`, `Makefile`, `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Consumes: `deploy/crd-undo.yaml` from the undo plan's Task 4.
-- Produces: `make verify-crd-undo`, and `verify-crd` as a three-way aggregate. Task 1's `kind` job already runs `make verify-crd`, so it needs no edit.
+- Consumes: `deploy/crd.yaml`, `deploy/crd-hardening.yaml` (both shipped), and `deploy/crd-undo.yaml` from the undo plan's Task 4.
+- Produces: `make envtest-assets`, `make test-envtest`, and a step in Task 1's `unit` job. Nothing else reads them.
 
-The spec's third item asks for envtest here. This task is what replaces it — see the Deviations section. `hack/verify-crd-hardening.sh` already runs fourteen cases against a real API server and asserts a specific error substring for each; this extends that mechanism to the third CRD rather than introducing a second one.
+This **replaces** the third CRD script. One mechanism per question: `hack/verify-crd-isolation.sh` and `hack/verify-crd-hardening.sh` stay because they are written, passing, and assert the installed-and-served path rather than the schema — but their **cases** are ported here, and no `hack/verify-crd-undo.sh` is written.
 
-- [ ] **Step 1: Write the script**
+NFR-01 is waived a second time for this, on the spec's authority. The argument is specific rather than general: a CEL transition rule that *errors* rather than refuses — which is exactly what an unguarded copy of 002's rule does against an optional `workloadSelector` — rejects every update including the one that arms the object, and reads as a broken CRD rather than a wrong rule. A Go test on every pull request is a better place to catch that than a cluster job.
 
-Create `hack/verify-crd-undo.sh`, modelled line for line on `hack/verify-crd-hardening.sh` — same `expect_reject` / `expect_accept` helpers, same insistence on an expected error substring, because "without it a manifest that fails to parse, or one rejected for an unrelated reason, reads as a passing test".
-
-Cases (AC-U12):
-
-| Case | Expected substring |
-| --- | --- |
-| empty namespace list | `should have at least 1 items` |
-| seventeen namespaces | `must have at most 16 items` |
-| duplicate namespace | `Duplicate value` |
-| namespaces omitted | `spec.namespaces: Required value` |
-| a `matchExpressions` selector | `matchExpressions` |
-| nine `matchLabels` entries | `must have at most 8 properties` |
-| an empty `matchLabels` | `should have at least 1 properties` |
-| a thirteen-character hash | `approvedPlan[0] in body should match` |
-| **accept** a valid object with no selector | — |
-| **accept** arming it with `approvedPlan` | — |
-| reject an edit to `spec.namespaces` | `only spec.approvedPlan may be changed` |
-| **reject adding** a `workloadSelector` to the selectorless object | `only spec.approvedPlan may be changed` |
-| **accept** a valid object *with* a selector | — |
-| reject an edit to that object's `workloadSelector` | `only spec.approvedPlan may be changed` |
-| **reject removing** its `workloadSelector` | `only spec.approvedPlan may be changed` |
-
-The last four are the point: they are what the `has()` guards buy, and an unguarded copy of 002's rule fails the two "accept" cases on a selectorless object with a CEL evaluation error rather than the transition message.
+- [ ] **Step 1: Add the dependency and vendor it**
 
 ```bash
-chmod +x hack/verify-crd-undo.sh
+go get sigs.k8s.io/controller-runtime@latest
+go mod vendor
+grep -c '^# ' vendor/modules.txt   # record the before/after for the commit message
 ```
 
+`setup-envtest` is a **build tool, not a dependency**: it is run through `go run` at a pinned version below and is never imported, so it does not enter `go.mod` and is not vendored.
 
-- [ ] **Step 2: Make it executable and add the make target**
+- [ ] **Step 2: Add the asset and test targets**
 
-```bash
-chmod +x hack/verify-crd-undo.sh
-```
+In the `Makefile`:
 
 ```make
-verify-crd-undo:
-	./hack/verify-crd-undo.sh
+# Pinned, both of them. setup-envtest at HEAD would change the control-plane
+# version under CI without a commit, and a schema that passes on one API server
+# version and fails on the next is exactly what this suite exists to catch.
+ENVTEST_VERSION ?= release-0.22
+ENVTEST_K8S_VERSION ?= 1.33.0
+SETUP_ENVTEST = go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
 
-verify-crd: verify-crd-isolation verify-crd-hardening verify-crd-undo
+envtest-assets:
+	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(CURDIR)/bin -p path
+
+test-envtest:
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(CURDIR)/bin -p path)" \
+		go test ./test/envtest/... -count=1
 ```
 
-Add `verify-crd-undo` to `.PHONY`. `verify-crd` is the aggregate the refactor plan's Task 4 created and Task 1's `kind` job already runs.
+Add both to `.PHONY`, and `bin/` to `.gitignore` — the control-plane binaries are fetched, not committed.
 
-- [ ] **Step 3: Run it against a live cluster**
+- [ ] **Step 3: Write the harness**
 
-```bash
-make kind-up || true
-kubectl apply -f deploy/crd-undo.yaml
-make verify-crd-undo
+Create `test/envtest/suite_test.go`:
+
+```go
+// Package envtest_test runs the three CRDs this repository ships against a real
+// API server and etcd, with no kubelet and no nodes.
+//
+// It is the only place the structural schemas and the CEL transition rules are
+// exercised from Go. The hack/verify-crd-*.sh scripts assert the same things
+// through kubectl against a kind cluster; those stay, because they also prove
+// the manifests install through `make deploy`. This asserts the schema itself,
+// on every pull request, in the fast job.
+package envtest_test
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+)
+
+var dyn dynamic.Interface
+
+const group = "hardening.acme.corp"
+
+var (
+	isolationGVR = schema.GroupVersionResource{Group: group, Version: "v1alpha1", Resource: "networkisolations"}
+	hardeningGVR = schema.GroupVersionResource{Group: group, Version: "v1alpha1", Resource: "workloadhardenings"}
+	undoGVR      = schema.GroupVersionResource{Group: group, Version: "v1alpha1", Resource: "workloadhardeningundos"}
+)
+
+// TestMain starts one control plane for the whole package and installs the
+// three CRDs from deploy/, so the manifests under test are the ones shipped
+// rather than a copy that can drift.
+//
+// It exits 0 with a message when KUBEBUILDER_ASSETS is unset, so `go test ./...`
+// on a machine with no control-plane binaries does not fail. That is also the
+// one way this suite can lie — a skip and a pass are indistinguishable in a
+// summary line — which is why Step 7 makes CI assert that it actually ran.
+func TestMain(m *testing.M) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		fmt.Println("envtest: KUBEBUILDER_ASSETS is unset; run `make envtest-assets`. Skipping.")
+		os.Exit(0)
+	}
+
+	env := &envtest.Environment{
+		CRDInstallOptions: envtest.CRDInstallOptions{
+			Paths: []string{
+				filepath.Join("..", "..", "deploy", "crd.yaml"),
+				filepath.Join("..", "..", "deploy", "crd-hardening.yaml"),
+				filepath.Join("..", "..", "deploy", "crd-undo.yaml"),
+			},
+			ErrorIfPathMissing: true,
+		},
+	}
+	cfg, err := env.Start()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "starting envtest: %v\n", err)
+		os.Exit(1)
+	}
+	if dyn, err = dynamic.NewForConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "dynamic client: %v\n", err)
+		_ = env.Stop()
+		os.Exit(1)
+	}
+
+	code := m.Run()
+	if err := env.Stop(); err != nil {
+		fmt.Fprintf(os.Stderr, "stopping envtest: %v\n", err)
+	}
+	os.Exit(code)
+}
+
+// apply creates obj, or updates it if it is already stored. Updating rather
+// than recreating is what exercises a CEL transition rule at all: oldSelf only
+// exists on an update.
+func apply(gvr schema.GroupVersionResource, obj map[string]any) error {
+	u := &unstructured.Unstructured{Object: obj}
+	c := dyn.Resource(gvr).Namespace(u.GetNamespace())
+	if stored, err := c.Get(context.Background(), u.GetName(), metav1.GetOptions{}); err == nil {
+		u.SetResourceVersion(stored.GetResourceVersion())
+		_, err := c.Update(context.Background(), u, metav1.UpdateOptions{})
+		return err
+	}
+	_, err := c.Create(context.Background(), u, metav1.CreateOptions{})
+	return err
+}
+
+// rejects asserts the API server refuses obj, and refuses it for the stated
+// reason. The expected substring is not decoration: without it, an object
+// rejected for an unrelated reason — or one that failed to parse — reads as a
+// passing test. hack/verify-crd-hardening.sh already carries that rule in a
+// comment; this is the same rule in Go.
+func rejects(t *testing.T, gvr schema.GroupVersionResource, want string, obj map[string]any) {
+	t.Helper()
+	err := apply(gvr, obj)
+	if err == nil {
+		t.Fatalf("accepted; want rejected with %q", want)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("rejected for the wrong reason:\n  got:  %v\n  want: %q", err, want)
+	}
+}
+
+func accepts(t *testing.T, gvr schema.GroupVersionResource, obj map[string]any) {
+	t.Helper()
+	if err := apply(gvr, obj); err != nil {
+		t.Fatalf("rejected; want accepted: %v", err)
+	}
+}
+
+// object is the boilerplate every case shares.
+func object(kind, name string, spec map[string]any) map[string]any {
+	return map[string]any{
+		"apiVersion": group + "/v1alpha1",
+		"kind":       kind,
+		"metadata":   map[string]any{"name": name, "namespace": "default"},
+		"spec":       spec,
+	}
+}
 ```
 
-Expected: every case reports `ok`, and the script prints `AC-U12 PASSED`.
+- [ ] **Step 4: Write the undo CRD's cases**
 
-- [ ] **Step 4: Confirm the four transition cases actually fired**
+Create `test/envtest/crd_test.go`. The undo CRD is new, so its cases are written here in full; the other two are ported in Step 5.
 
-```bash
-make verify-crd-undo | grep -c 'only spec.approvedPlan may be changed'
+```go
+package envtest_test
+
+import "testing"
+
+func undoSpec(extra map[string]any) map[string]any {
+	spec := map[string]any{"namespaces": []any{"tenant-a"}}
+	for k, v := range extra {
+		spec[k] = v
+	}
+	return spec
+}
+
+// AC-U12's structural half. Every one of these is a shape the API server must
+// refuse before an object reaches the controller at all.
+func TestUndoSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		spec       map[string]any
+	}{
+		{"empty namespace list", "should have at least 1 items",
+			map[string]any{"namespaces": []any{}}},
+		{"seventeen namespaces", "must have at most 16 items",
+			map[string]any{"namespaces": []any{"n01", "n02", "n03", "n04", "n05", "n06", "n07", "n08", "n09", "n10", "n11", "n12", "n13", "n14", "n15", "n16", "n17"}}},
+		{"duplicate namespace", "Duplicate value",
+			map[string]any{"namespaces": []any{"tenant-a", "tenant-a"}}},
+		{"namespaces omitted", "spec.namespaces: Required value",
+			map[string]any{}},
+		{"an uppercase namespace", "in body should match",
+			map[string]any{"namespaces": []any{"Tenant-A"}}},
+		{"a matchExpressions selector", "matchExpressions",
+			undoSpec(map[string]any{"workloadSelector": map[string]any{
+				"matchExpressions": []any{map[string]any{"key": "app", "operator": "Exists"}}}})},
+		{"an empty matchLabels", "should have at least 1 properties",
+			undoSpec(map[string]any{"workloadSelector": map[string]any{"matchLabels": map[string]any{}}})},
+		{"nine matchLabels entries", "must have at most 8 properties",
+			undoSpec(map[string]any{"workloadSelector": map[string]any{"matchLabels": map[string]any{
+				"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6", "g": "7", "h": "8", "i": "9"}}})},
+		{"a workloadSelector with no matchLabels", "matchLabels: Required value",
+			undoSpec(map[string]any{"workloadSelector": map[string]any{}})},
+		{"a thirteen-character hash", "in body should match",
+			undoSpec(map[string]any{"approvedPlan": []any{"0123456789abc"}})},
+		{"an uppercase hash", "in body should match",
+			undoSpec(map[string]any{"approvedPlan": []any{"0123456789AB"}})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rejects(t, undoGVR, tc.want, object("WorkloadHardeningUndo", "schema-"+t.Name(), tc.spec))
+		})
+	}
+}
+
+// AC-U12's transition half, and the reason this suite is worth its dependency.
+//
+// These run in one test rather than as subtests because each step acts on what
+// the previous one stored: a transition rule only exists on an update, so the
+// order is the assertion.
+//
+// The two `accepts` are the load-bearing ones. An unguarded copy of 002's rule
+// — `self.workloadSelector == oldSelf.workloadSelector` with no has() guard —
+// raises a CEL runtime error on an object that omits the field, and a rule that
+// errors rejects the update. Both of these would fail, including the one that
+// arms the object, and the message would read as a broken CRD rather than a
+// wrong rule.
+func TestUndoTransitionRule(t *testing.T) {
+	const immutable = "only spec.approvedPlan may be changed"
+
+	// A selectorless object: created, then armed.
+	accepts(t, undoGVR, object("WorkloadHardeningUndo", "no-selector",
+		map[string]any{"namespaces": []any{"tenant-a", "tenant-b"}}))
+	accepts(t, undoGVR, object("WorkloadHardeningUndo", "no-selector",
+		map[string]any{"namespaces": []any{"tenant-a", "tenant-b"}, "approvedPlan": []any{"0123456789ab"}}))
+
+	rejects(t, undoGVR, immutable, object("WorkloadHardeningUndo", "no-selector",
+		map[string]any{"namespaces": []any{"tenant-a", "tenant-c"}, "approvedPlan": []any{"0123456789ab"}}))
+	rejects(t, undoGVR, immutable, object("WorkloadHardeningUndo", "no-selector",
+		map[string]any{"namespaces": []any{"tenant-a", "tenant-b"}, "approvedPlan": []any{"0123456789ab"},
+			"workloadSelector": map[string]any{"matchLabels": map[string]any{"app": "api"}}}))
+
+	// An object that has one: created, armed, then edited and stripped.
+	withSelector := func(sel map[string]any, approved ...any) map[string]any {
+		spec := map[string]any{"namespaces": []any{"tenant-a"}}
+		if sel != nil {
+			spec["workloadSelector"] = map[string]any{"matchLabels": sel}
+		}
+		if len(approved) > 0 {
+			spec["approvedPlan"] = approved
+		}
+		return object("WorkloadHardeningUndo", "with-selector", spec)
+	}
+
+	accepts(t, undoGVR, withSelector(map[string]any{"app": "api"}))
+	accepts(t, undoGVR, withSelector(map[string]any{"app": "api"}, "cafebabe1234"))
+	rejects(t, undoGVR, immutable, withSelector(map[string]any{"app": "worker"}, "cafebabe1234"))
+	rejects(t, undoGVR, immutable, withSelector(nil, "cafebabe1234"))
+}
 ```
 
-Expected: `4`. Those four are what the `has()` guards buy. An unguarded copy of 002's rule fails the two *accept* cases on a selectorless object with a CEL evaluation error instead, so a run where they do not appear has tested the wrong thing.
+- [ ] **Step 5: Port the other two CRDs' cases**
 
-- [ ] **Step 5: Verify the aggregate reaches it**
+Add `TestIsolationSchema` and `TestHardeningSchema` in the same shape, porting every case from the scripts rather than inventing new ones — the scripts are the record of what these schemas are supposed to refuse.
+
+| Source | Cases to port | Note |
+| --- | --- | --- |
+| `hack/verify-crd-hardening.sh` | 14 (`expect_reject` × 11, `expect_accept` × 3) | includes the `10mm` quantity case and both `limits` cases, one structural and one CEL |
+| `hack/verify-crd-isolation.sh` | whatever it declares | count them first: `grep -c 'expect_reject\|expect_accept' hack/verify-crd-isolation.sh` |
+
+Then assert the port is complete rather than trusting it:
 
 ```bash
-make -n verify-crd | grep -c verify-crd-undo.sh
+scripts=$(grep -ch 'expect_reject\|expect_accept' hack/verify-crd-isolation.sh hack/verify-crd-hardening.sh | paste -sd+ | bc)
+ported=$(grep -c '{"' test/envtest/crd_test.go)
+echo "scripts: $scripts   ported (plus 15 undo cases): $ported"
 ```
 
-Expected: `1`.
+A port that silently drops a case is the failure mode here, and it is invisible: the suite still passes.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run it**
 
 ```bash
-git add hack/verify-crd-undo.sh Makefile
-git commit -m "test(undo): AC-U12 against a real API server
+make envtest-assets
+make test-envtest
+```
 
-Fifteen cases, each asserting a specific error substring — without one, a
-manifest that fails to parse or is rejected for an unrelated reason reads as a
-passing test, which is the comment verify-crd-hardening.sh already carries.
+Expected: `ok  github.com/joaopaulosr95/k8s-workload-hardening/test/envtest`, with every subtest passing. If `TestUndoTransitionRule`'s two `accepts` fail with a CEL evaluation error rather than the immutability message, the CRD's rule is missing its `has()` guards — fix `deploy/crd-undo.yaml`, not the test.
 
-Four of them are the transition rule. workloadSelector is optional, so an
-unguarded copy of 002's rule raises a CEL runtime error on an object that omits
-it, and an erroring transition rule rejects every update including the
-approvedPlan edit that arms the object. Two accepts and two rejects pin that.
+- [ ] **Step 7: Prove the suite can fail, and cannot silently skip**
 
-Extends the existing mechanism rather than adding envtest beside it: same
-assertions, same admission chain, on the cluster CI already starts.
+Temporarily strip the guards from `deploy/crd-undo.yaml`'s transition rule:
+
+```yaml
+                - rule: >-
+                    self.namespaces == oldSelf.namespaces &&
+                    self.workloadSelector == oldSelf.workloadSelector
+```
+
+```bash
+make test-envtest 2>&1 | grep -c FAIL
+```
+
+Expected: non-zero, with `TestUndoTransitionRule` failing on the *first* `accepts` — the object with no selector cannot even be created's successor updated. **Restore the guards.** This is the single failure this task was waived a dependency for; a run that does not reproduce it has not earned the dependency.
+
+Then prove a missing asset does not pass silently:
+
+```bash
+KUBEBUILDER_ASSETS= go test ./test/envtest/... 2>&1 | tail -2
+```
+
+Expected: the skip message and `ok`. That is the lie Step 8's CI step exists to catch.
+
+- [ ] **Step 8: Wire it into CI**
+
+In `.github/workflows/ci.yml`, in the `unit` job created by Task 1, after the coverage step:
+
+```yaml
+      - name: CRD schemas and CEL rules (envtest)
+        run: |
+          set -euo pipefail
+          out=$(make test-envtest 2>&1) || { printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out"
+          # A skipped suite and a passing one are the same summary line, and the
+          # skip is what happens when the asset fetch silently fails.
+          if printf '%s' "$out" | grep -q 'KUBEBUILDER_ASSETS is unset'; then
+            echo "envtest skipped: the control-plane assets were not fetched"; exit 1
+          fi
+          printf '%s' "$out" | grep -qE '^ok[[:space:]].*test/envtest' || { echo "envtest did not run"; exit 1; }
+```
+
+It goes in the `unit` job, not the `kind` one: envtest needs no cluster, and putting it behind the slow job would lose the whole point of adding it.
+
+- [ ] **Step 9: Run the full suite**
+
+Run: `go test ./... -race && make cover && make test-envtest`
+Expected: every package `ok`, coverage at or above 90%, envtest green. `make cover` covers `./pkg/...` only, so `test/envtest` does not move the number — it asserts manifests, not Go statements.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add go.mod go.sum vendor .gitignore test/envtest Makefile .github/workflows/ci.yml
+git commit -m "test(crd): all three schemas and CEL rules under envtest
+
+NFR-01 waived a second time, for sigs.k8s.io/controller-runtime. The argument
+is narrow: a CEL transition rule that errors rather than refuses rejects every
+update, including the one that arms the object, and reads as a broken CRD
+rather than a wrong rule. That is exactly what an unguarded copy of 002's rule
+does against an optional workloadSelector, and nothing catches it until
+something applies the right object in the right order.
+
+Replaces the planned hack/verify-crd-undo.sh rather than joining it — one
+mechanism per question. The two existing scripts stay: they are written,
+passing, and assert the installed-and-served path through make deploy, which
+this does not. Their cases are ported here rather than reinvented, and Step 5
+asserts the port dropped nothing.
+
+Runs in the unit job, not behind the kind cluster. Needing no cluster is most
+of why it is worth having.
+
+The suite exits 0 when the control-plane binaries are absent, so go test ./...
+works on a bare machine — and CI therefore asserts it actually ran, because a
+skip and a pass are the same summary line.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -458,14 +742,14 @@ Expected: at least one `BlockedByPodSecurity` from `undo-restricted` and one `Bl
 
 - [ ] **Step 6: Wire it into CI**
 
-In `.github/workflows/ci.yml`, the `kind` job already runs `make verify-crd` and `make verify`, and Task 2 plus Step 3 above added the undo suites to both aggregates — so the workflow needs no edit. Confirm:
+In `.github/workflows/ci.yml`, the `kind` job already runs `make verify`, and Step 3 above added `verify-undo` to that aggregate — so the workflow needs no edit for this task. Task 2 added its own step to the `unit` job. Confirm:
 
 ```bash
 make -n verify | grep -c verify-undo.sh
-make -n verify-crd | grep -c verify-crd-undo.sh
+grep -c 'make test-envtest' .github/workflows/ci.yml
 ```
 
-Expected: `1` and `1`.
+Expected: `1` and `1`. Note that `verify-crd` stays a two-way aggregate: the undo CRD's schema is asserted by envtest in the fast job, not by a third script.
 
 - [ ] **Step 7: Commit**
 
@@ -500,7 +784,7 @@ The five the spec's NFR-U04 marks script-only, plus AC-U12. A fake client runs n
 | AC-U05 | 3 | LimitRange minimums are enforced at pod admission, which a fake client never performs |
 | AC-U08 | 3 | The `filled` annotation is copied onto a ReplicaSet by the Deployment controller, which a fake client does not run |
 | AC-U11 | 3 | Two real rollouts and a real QoS class |
-| AC-U12 | 2 | The CRD's structural schema and CEL rules are evaluated by the API server |
+| AC-U12 | 2 | The structural schema and the CEL transition rule are evaluated by the API server; envtest gives one without a cluster |
 
 ## Review Focus coverage
 
@@ -508,13 +792,16 @@ The five the spec's NFR-U04 marks script-only, plus AC-U12. A fake client runs n
 | --- | --- | --- |
 | 1 | A CI cluster name that disagrees with the Makefile | 1 Step 2 |
 | 2 | A green script that tested nothing | 3 Step 5 |
-| 3 | A transition rule that rejects everything | 2 Step 4 |
+| 3 | A transition rule that rejects everything | 2 Steps 4 and 7 |
+| 4 | An envtest suite that skipped rather than passed | 2 Steps 7 and 8 |
 
 ## Deviations and clarifications to confirm before merging
 
-1. **DECLINED — envtest for the CEL rules and structural schemas.** The spec asks for it as item 3, on the ground that the scripts "cover only as far as `kubectl apply` reports". They cover considerably more: `hack/verify-crd-hardening.sh` runs fourteen `expect_reject`/`expect_accept` cases against a real API server and asserts a **specific error substring** for each, with a comment explaining why the substring is load-bearing. That is the assertion envtest would make, against the same admission chain, on a cluster Task 1 now starts anyway. Buying it would mean `sigs.k8s.io/controller-runtime` plus a downloaded control-plane binary — a large new dependency against NFR-01, whose one waiver is `prometheus/client_golang` and is granted for a different reason. Task 2 extends the existing mechanism rather than introducing a second one. **If the spec wants envtest regardless, say so and NFR-01 needs a second waiver.**
+1. **RESOLVED — envtest is built, and NFR-01 is waived a second time.** An earlier draft of this plan declined it: the `verify-crd-*.sh` scripts already assert specific error substrings against a real API server, on a cluster Task 1 now starts anyway, so envtest looked like a second mechanism for a question already answered. The decision went the other way, and the spec now records the waiver and the reason. The argument that carries it is narrower than "more testing is better": a CEL transition rule that **errors** rather than refuses rejects every update including the one that arms the object, reads as a broken CRD rather than a wrong rule, and is invisible until something applies the right object in the right order. A Go test in the fast job is where that belongs.
 
-2. **`hack/verify-undo.sh` and `hack/verify-crd-undo.sh` live here rather than in the undo plan.** The spec puts them here (items 2 and 3 of this section), and this plan follows it — every `hack/verify-*.sh` in the repository is owned by one document. The cost is real and worth naming: the undo plan ships a CRD whose rejection cases are asserted in a different file, so its Task 4 proves the schema **installs** and this plan's Task 2 proves it **refuses**. If a reviewer would rather each feature carried its own verification, move Tasks 2 and 3 into the undo plan wholesale; nothing else changes.
+   Two consequences, both deliberate. Envtest **replaces** the planned `hack/verify-crd-undo.sh` rather than joining it — one mechanism per question — so `verify-crd` stays a two-way aggregate. And the two existing scripts stay exactly as they are, because they assert something envtest does not: that the manifests install through `make deploy` on a real cluster. Their cases are ported into Task 2, and Step 5 asserts the port dropped none.
+
+2. **`hack/verify-undo.sh` lives here rather than in the undo plan.** The spec puts it here (item 2 of this section), and this plan follows it — every `hack/verify-*.sh` in the repository is owned by one document. The cost is real and worth naming: the undo plan ships a CRD whose rejection cases are asserted elsewhere, so its Task 4 proves the schema **installs** and this plan's Task 2 proves it **refuses**. If a reviewer would rather each feature carried its own verification, move Tasks 2 and 3 into the undo plan wholesale; nothing else changes.
 
 3. **CI runs the aggregates, not the individual scripts.** Task 1's `kind` job runs `make verify` and `make verify-crd`, which the refactor plan's Task 4 defines. Tasks 2 and 3 add themselves to those aggregates rather than to the workflow, so a fourth feature's suite joins CI by editing the Makefile and nothing else. The metrics plan adds one step to this workflow directly, because a metrics assertion is not a `verify-*` script.
 
