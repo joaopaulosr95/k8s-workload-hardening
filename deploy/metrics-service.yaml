@@ -3,11 +3,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: network-isolation-metrics
+  name: k8s-workload-hardening-metrics
   namespace: isolation-system
-  labels: {app: network-isolation}
+  labels: {app: k8s-workload-hardening}
 spec:
-  selector: {app: network-isolation}
+  selector: {app: k8s-workload-hardening}
   ports:
     - name: metrics
       port: 8080

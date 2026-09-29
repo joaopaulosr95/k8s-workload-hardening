@@ -66,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           KUBECTL="kubectl --context=kind-hardening"
-          $KUBECTL -n isolation-system rollout status deployment/network-isolation --timeout=120s
+          $KUBECTL -n isolation-system rollout status deployment/k8s-workload-hardening --timeout=120s
           # Assert known series, not a 200. A port that is bound but serving an
           # empty body looks identical to a healthy one from the manifest. This
           # runs after `make verify`, so a real reconcile has exercised them --
@@ -74,7 +74,7 @@ jobs:
           # until its first observation.
           body=$($KUBECTL -n isolation-system run metrics-probe \
             --rm -i --restart=Never --image=curlimages/curl:8.11.1 --quiet -- \
-            -sS --max-time 10 http://network-isolation-metrics:8080/metrics)
+            -sS --max-time 10 http://k8s-workload-hardening-metrics:8080/metrics)
           for want in hardening_reconcile_total hardening_targets_patched_total \
                       hardening_dryrun_refusals_total hardening_queue_depth; do
             printf '%s' "$body" | grep -q "^# TYPE $want" || { echo "missing: $want"; exit 1; }
@@ -82,4 +82,4 @@ jobs:
           echo "ok: /metrics serves every declared series"
       - name: Controller logs on failure
         if: failure()
-        run: kubectl --context=kind-hardening -n isolation-system logs deployment/network-isolation --tail=200 || true
+        run: kubectl --context=kind-hardening -n isolation-system logs deployment/k8s-workload-hardening --tail=200 || true

@@ -120,7 +120,7 @@ jobs:
         run: make verify
       - name: Controller logs on failure
         if: failure()
-        run: kubectl -n isolation-system logs deployment/network-isolation --tail=200 || true
+        run: kubectl -n isolation-system logs deployment/k8s-workload-hardening --tail=200 || true
 ```
 
 - [ ] **Step 2: Verify the cluster name matches the Makefile (Review Focus 3)**

@@ -566,7 +566,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: the `:8080` default from Task 3.
-- Produces: a `Service/network-isolation-metrics` in `isolation-system` on port 8080, and the pod annotations any scraper needs.
+- Produces: a `Service/k8s-workload-hardening-metrics` in `isolation-system` on port 8080, and the pod annotations any scraper needs.
 
 - [ ] **Step 1: Add the port and the scrape annotations**
 
@@ -574,7 +574,7 @@ In `deploy/controller.yaml`, add to the pod template's `metadata`:
 
 ```yaml
     metadata:
-      labels: {app: network-isolation}
+      labels: {app: k8s-workload-hardening}
       annotations:
         # Scraped by annotation rather than by ServiceMonitor: the raw
         # prometheus chart ships no operator and no CRDs, and its default
@@ -605,11 +605,11 @@ Create `deploy/metrics-service.yaml`:
 apiVersion: v1
 kind: Service
 metadata:
-  name: network-isolation-metrics
+  name: k8s-workload-hardening-metrics
   namespace: isolation-system
-  labels: {app: network-isolation}
+  labels: {app: k8s-workload-hardening}
 spec:
-  selector: {app: network-isolation}
+  selector: {app: k8s-workload-hardening}
   ports:
     - name: metrics
       port: 8080
@@ -633,12 +633,12 @@ In `.github/workflows/ci.yml`, in the `kind` job, after the step that runs `make
       - name: Metrics endpoint
         run: |
           set -euo pipefail
-          kubectl -n isolation-system rollout status deployment/network-isolation --timeout=120s
+          kubectl -n isolation-system rollout status deployment/k8s-workload-hardening --timeout=120s
           # Assert a known series, not a 200. A port that is bound but serving
           # an empty body looks identical to a healthy one from the manifest.
           body=$(kubectl -n isolation-system run metrics-probe \
             --rm -i --restart=Never --image=curlimages/curl:8.11.1 --quiet -- \
-            -sS --max-time 10 http://network-isolation-metrics:8080/metrics)
+            -sS --max-time 10 http://k8s-workload-hardening-metrics:8080/metrics)
           for want in hardening_reconcile_total hardening_targets_patched_total \
                       hardening_dryrun_refusals_total hardening_queue_depth; do
             printf '%s' "$body" | grep -q "^# TYPE $want" || { echo "missing: $want"; exit 1; }
@@ -657,7 +657,7 @@ pod=$(awk '/^      labels:/{print $2 $3; exit}' deploy/controller.yaml)
 echo "service selector=$svc  pod labels=$pod"
 ```
 
-Expected: both manifests validate, and the two label expressions agree on `app:network-isolation`. A Service whose selector matches nothing returns a connection refused that reads exactly like a dead controller.
+Expected: both manifests validate, and the two label expressions agree on `app:k8s-workload-hardening`. A Service whose selector matches nothing returns a connection refused that reads exactly like a dead controller.
 
 - [ ] **Step 6: Document the endpoint in the README**
 

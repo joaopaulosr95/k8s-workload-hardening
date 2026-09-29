@@ -1,4 +1,5 @@
-// Command main runs the network-isolation controller.
+// Command main runs the k8s-workload-hardening controller: NetworkIsolation
+// and WorkloadHardening in one binary.
 package main
 
 import (

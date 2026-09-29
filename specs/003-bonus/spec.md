@@ -59,11 +59,14 @@ beyond a rename is a finding, not a refactor.
 `samples-isolation`, and keep a `verify` that runs both — which is what the CI job in the
 integration-tests section needs anyway.
 
-`deploy` restarts `deployment/network-isolation` in namespace `isolation-system`: one controller
-process serving both CRDs, named after the first one written. Renaming it is the only item in
-this whole refactor that is **not** free — it moves an RBAC subject and every script that names
-it — so it is a decision rather than a rename, and skipping it costs nothing but a misleading
-name.
+`deploy` restarts `deployment/k8s-workload-hardening` in namespace `isolation-system`: one
+controller process serving both CRDs. It was named `network-isolation` after the first CRD
+written, which stopped being true the moment the second one shipped. Renaming it was the only
+item in this refactor that was **not** free — it moves an RBAC subject, the ServiceAccount, the
+ClusterRole and the ClusterRoleBinding, and every script and manifest that names any of them —
+so it was a decision rather than a rename, and it was taken. The `isolation-system` namespace
+keeps its name: it is referenced by every sample, script and verification, and unlike the
+Deployment it is not the thing the project is called.
 
 **Docs.** The README was written for 001 and 002 was appended: `# core task 2` sits at line 54
 inside `## Setup`, and lines 241–340 duplicate the structure a second time (Decisions and
