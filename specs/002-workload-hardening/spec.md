@@ -7,7 +7,6 @@ description: |
 author: João Bastos <joaopaulosr95@gmail.com>
 status: Approved
 relatedResources:
-  - docs/assignment.md
   - specs/001-network-isolation/spec.md
   - specs/003-bonus/spec.md
 ---

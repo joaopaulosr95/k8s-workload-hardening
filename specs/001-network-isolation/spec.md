@@ -5,8 +5,6 @@ description: |
   through a NetworkIsolation custom resource. Reversible by deleting the resource.
 author: João Bastos <joaopaulosr95@gmail.com>
 status: Approved
-relatedResources:
-  - docs/assignment.md
 ---
 
 # On-demand network isolation

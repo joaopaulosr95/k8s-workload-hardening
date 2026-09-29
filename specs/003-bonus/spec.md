@@ -15,7 +15,6 @@ status: Draft
 #   [ ] Metrics endpoint    — specs/003-bonus/metrics/tasks.md
 #   [ ] Documentation       — specs/003-bonus/docs/tasks.md
 relatedResources:
-  - docs/assignment.md
   - specs/001-network-isolation/spec.md
   - specs/002-workload-hardening/spec.md
 ---
