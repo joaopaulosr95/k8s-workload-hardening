@@ -5,14 +5,14 @@ description: |
   001 and 002, and Diátaxis documentation for the whole project. Four scoping notes rather than
   four specs: none of them changes what this tool does to a cluster.
 author: João Bastos <joaopaulosr95@gmail.com>
-status: Draft
-# Flip to Approved once all four items have landed. 001 and 002 are Approved;
-# this one stays Draft while any of its four is unbuilt, so the status answers
-# "is this spec describing shipped behaviour?" rather than "has anyone read it".
+status: Approved
+# All four have landed, so this describes shipped behaviour. 001 and 002 are
+# Approved too. The status answers "is this spec describing shipped
+# behaviour?" rather than "has anyone read it".
 #   [x] Refactor            — specs/003-bonus/refactor/tasks.md, merged
 #   [x] Integration tests   — specs/003-bonus/integration-tests/tasks.md, merged
 #   [x] Metrics endpoint    — specs/003-bonus/metrics/tasks.md, merged
-#   [ ] Documentation       — specs/003-bonus/docs/tasks.md
+#   [x] Documentation       — specs/003-bonus/docs/tasks.md, merged
 relatedResources:
   - specs/001-network-isolation/spec.md
   - specs/002-workload-hardening/spec.md
