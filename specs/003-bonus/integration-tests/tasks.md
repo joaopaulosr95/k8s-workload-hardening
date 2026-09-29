@@ -16,14 +16,14 @@
 
 ## Global Constraints
 
-- **NFR-01 is waived a second time, for `sigs.k8s.io/controller-runtime`, and for nothing else.** The spec grants it in its integration-tests section. **After adding it, run `go mod vendor` and commit the vendor changes in the same commit.** `setup-envtest` is a build tool run through `go run` at a pinned version: it is never imported, so it does not enter `go.mod`.
+- **NFR-01 is waived a second time, for `sigs.k8s.io/controller-runtime`, and for nothing else.** The spec grants it in its integration-tests section. **After adding it, run `go mod vendor` so the local build keeps working, and commit `go.mod` and `go.sum` — `vendor/` is not tracked.** `setup-envtest` is a build tool run through `go run` at a pinned version: it is never imported, so it does not enter `go.mod` either.
 - **Both the tool version and the control-plane version are pinned** in the `Makefile`. `setup-envtest` at HEAD would change the API server under CI without a commit, and a schema that passes on one version and fails on the next is exactly what this suite exists to catch.
 - **The existing scripts are not rewritten.** `hack/verify-isolation.sh`, `hack/verify-hardening.sh` and `hack/verify-crd-hardening.sh` are finished. The only change any of them may receive is a rename, and that belongs to the refactor plan.
 - **Every `expect_reject` asserts a specific error substring.** `hack/verify-crd-hardening.sh` carries the reason in a comment: "without it a manifest that fails to parse, or one rejected for an unrelated reason, reads as a passing test." Task 2 follows it.
 - **The CI cluster name must equal the Makefile's `CLUSTER`.** `kind load docker-image` names the cluster explicitly.
 - **Failure must be diagnosable from the job log alone.** A red kind job with no controller logs costs a full re-run to understand.
 - **Module path:** `github.com/joaopaulosr95/k8s-workload-hardening`. Go 1.27.1, exactly as `go.mod` declares.
-- **The repository vendors.** `vendor/` is committed and `go build`/`go test` use it. Never run `go mod tidy`.
+- **`vendor/` is on disk but is NOT committed.** It is listed in `.gitignore` and `git ls-files vendor` returns nothing. Two consequences, and they pull in opposite directions. Locally, `vendor/modules.txt` exists, so Go builds in vendor mode automatically — verified: `go list` resolves `k8s.io/client-go` to `./vendor/...` — and a newly added dependency makes the build fail with "inconsistent vendoring" until `go mod vendor` is re-run. In a fresh clone, which is what CI gets, there is no `vendor/` at all and modules resolve from the cache against `go.sum`. So: run `go mod vendor` locally to keep building, and commit **`go.mod` and `go.sum` only**. Never run `go mod tidy`.
 - **Coverage:** `go test ./pkg/... -cover` must reach ≥90% per package (`AGENTS.md`), enforced by `make cover`. Today's total is 93.5% and the lowest package is 91.7%. `cmd/` is wiring and is excluded.
 - **`AGENTS.md` role constraint:** do not edit `specs/003-bonus/spec.md`, and do not create or modify anything else under `specs/` except this file. If the implementation needs behaviour the spec does not describe, stop and raise it rather than inventing a requirement. Every such point this plan already found is listed in "Deviations and clarifications to confirm before merging" at the end.
 - **Commit style:** conventional commits (`feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `build:`, `ci:`, `chore:`), one per task step where the plan says commit.
@@ -90,9 +90,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          # The repository vendors its dependencies, so there is nothing to
-          # download and nothing worth caching between runs.
-          cache: false
+          # A fresh clone has no vendor/ — it is gitignored — so every run
+          # resolves modules from go.sum. Caching is worth having here, and
+          # the k8s.io tree is most of what it saves.
+          cache: true
       - name: go vet
         run: go vet ./pkg/... ./cmd/...
       - name: Unit tests
@@ -107,7 +108,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
       - name: Create the cluster
         uses: helm/kind-action@v1
         with:
@@ -187,7 +188,7 @@ Expected: both jobs pass. This is the only task in the plan whose deliverable ca
 **Files:**
 - Create: `test/envtest/suite_test.go`
 - Create: `test/envtest/crd_test.go`
-- Modify: `go.mod`, `go.sum`, `vendor/` (regenerated), `.gitignore`, `Makefile`, `.github/workflows/ci.yml`
+- Modify: `go.mod`, `go.sum`, `.gitignore`, `Makefile`, `.github/workflows/ci.yml` (`vendor/` is regenerated locally and is not tracked)
 
 **Interfaces:**
 - Consumes: `deploy/crd.yaml`, `deploy/crd-hardening.yaml` (both shipped), and `deploy/crd-undo.yaml` from the undo plan's Task 4.
@@ -201,9 +202,13 @@ NFR-01 is waived a second time for this, on the spec's authority. The argument i
 
 ```bash
 go get sigs.k8s.io/controller-runtime@latest
-go mod vendor
-grep -c '^# ' vendor/modules.txt   # record the before/after for the commit message
+go mod vendor      # local only: vendor/ is gitignored, and without this the
+                   # build fails with "inconsistent vendoring"
+go build ./... && echo BUILD-OK
+git diff --stat go.mod go.sum      # this is what the commit carries
 ```
+
+Expected: `BUILD-OK`, and a `go.mod`/`go.sum` diff naming controller-runtime and its transitive set.
 
 `setup-envtest` is a **build tool, not a dependency**: it is run through `go run` at a pinned version below and is never imported, so it does not enter `go.mod` and is not vendored.
 
@@ -541,7 +546,7 @@ Expected: every package `ok`, coverage at or above 90%, envtest green. `make cov
 - [ ] **Step 10: Commit**
 
 ```bash
-git add go.mod go.sum vendor .gitignore test/envtest Makefile .github/workflows/ci.yml
+git add go.mod go.sum .gitignore test/envtest Makefile .github/workflows/ci.yml
 git commit -m "test(crd): all three schemas and CEL rules under envtest
 
 NFR-01 waived a second time, for sigs.k8s.io/controller-runtime. The argument

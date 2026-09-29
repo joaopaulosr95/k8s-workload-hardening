@@ -16,13 +16,13 @@
 
 ## Global Constraints
 
-- **NFR-01 is waived for exactly one dependency: `github.com/prometheus/client_golang`.** Its transitive set comes with it and is accepted; nothing else. **After adding it, run `go mod vendor` and commit the vendor changes in the same commit.** The waiver is the spec's and does not extend to any other plan.
+- **NFR-01 is waived for exactly one dependency: `github.com/prometheus/client_golang`.** Its transitive set comes with it and is accepted; nothing else. **After adding it, run `go mod vendor` so the local build keeps working, and commit `go.mod` and `go.sum` — `vendor/` is not tracked, so there are no vendor changes to commit.** The waiver is the spec's and does not extend to any other plan.
 - **No new RBAC.** Serving metrics reads nothing from the Kubernetes API.
 - **Labels are closed sets.** `resource` is one of three, `phase` one of eight. A namespace or object name must never become a label value.
 - **One call site per counter.** A second `metrics.TargetPatched()` anywhere would double-count a retry.
 - **Port 8080 everywhere:** the flag default, the container port, the Service, and the scrape annotation.
 - **Module path:** `github.com/joaopaulosr95/k8s-workload-hardening`. Go 1.27.1, exactly as `go.mod` declares.
-- **The repository vendors.** `vendor/` is committed and `go build`/`go test` use it. Never run `go mod tidy`.
+- **`vendor/` is on disk but is NOT committed.** It is listed in `.gitignore` and `git ls-files vendor` returns nothing. Two consequences, and they pull in opposite directions. Locally, `vendor/modules.txt` exists, so Go builds in vendor mode automatically — verified: `go list` resolves `k8s.io/client-go` to `./vendor/...` — and a newly added dependency makes the build fail with "inconsistent vendoring" until `go mod vendor` is re-run. In a fresh clone, which is what CI gets, there is no `vendor/` at all and modules resolve from the cache against `go.sum`. So: run `go mod vendor` locally to keep building, and commit **`go.mod` and `go.sum` only**. Never run `go mod tidy`.
 - **Coverage:** `go test ./pkg/... -cover` must reach ≥90% per package (`AGENTS.md`), enforced by `make cover`. Today's total is 93.5% and the lowest package is 91.7%. `cmd/` is wiring and is excluded.
 - **`AGENTS.md` role constraint:** do not edit `specs/003-bonus/spec.md`, and do not create or modify anything else under `specs/` except this file. If the implementation needs behaviour the spec does not describe, stop and raise it rather than inventing a requirement. Every such point this plan already found is listed in "Deviations and clarifications to confirm before merging" at the end.
 - **Commit style:** conventional commits (`feat:`, `test:`, `fix:`, `refactor:`, `docs:`, `build:`, `ci:`, `chore:`), one per task step where the plan says commit.
@@ -59,7 +59,7 @@ A fourth, checked and handled rather than listed: a metric registered twice pani
 **Files:**
 - Create: `pkg/metrics/metrics.go`
 - Create: `pkg/metrics/metrics_test.go`
-- Modify: `go.mod`, `go.sum`, `vendor/` (regenerated)
+- Modify: `go.mod`, `go.sum` (committed); `vendor/` is regenerated locally and is not tracked
 
 **Interfaces:**
 - Consumes: nothing.
@@ -76,14 +76,15 @@ A fourth, checked and handled rather than listed: a metric registered twice pani
 
 ```bash
 go get github.com/prometheus/client_golang@latest
-go mod vendor
-git status --short vendor/ | head -5
+go mod vendor      # local only: vendor/ is gitignored, and without this the
+                   # build fails with "inconsistent vendoring"
+go build ./... && echo BUILD-OK
 ```
 
-Expected: `vendor/github.com/prometheus/...` appears. Record the count for the commit message:
+Expected: `BUILD-OK`. Then record what the commit actually carries — the module lines, not a vendor count:
 
 ```bash
-grep -c '^# ' vendor/modules.txt   # was 48
+git diff --stat go.mod go.sum
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -293,14 +294,16 @@ Expected: five packages `ok`, coverage at or above 90%.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add go.mod go.sum vendor pkg/metrics
+git add go.mod go.sum pkg/metrics
 git commit -m "feat(metrics): six series on a private registry
 
 NFR-01 waived for prometheus/client_golang, and for nothing else. The
 hand-rolled version really is forty lines of net/http and sync/atomic with no
 go.mod change — and forty lines every reviewer has to check for escaping and
 '# TYPE' ordering before trusting, against a library every scraper assumes.
-The cost is a visibly larger vendor/, which is the trade being accepted.
+The cost is go.mod and go.sum gaining prometheus and its transitive set.
+vendor/ grows too, but locally only — it is gitignored — so what a reviewer
+sees is the module lines. That is the trade being accepted.
 
 A private registry rather than the default one: a vendored library that also
 registers the Go collector would panic the process at init.
@@ -869,7 +872,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 1. **Five counters and one gauge, not six counters.** The spec says "about six counters worth having… reconciles by phase, targets patched, targets reverted, dry-run refusals, apply failures, queue depth". Queue depth goes down as well as up, so it is a gauge; a counter that decreases breaks `rate()` and every dashboard built on it. The other five are counters as described. Task 1.
 
-2. **The spec's own argument for the hand-rolled version is recorded and overruled.** Six counters in the text exposition format really are `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly forty lines with no `go.mod` change. The user's decision, recorded in the spec, is the library — and the plan states the reason on its own terms rather than deferring: a hand-rolled exposition is forty lines every reviewer must check for escaping and `# TYPE` ordering before trusting. The cost is named in Task 1's commit: `go.sum` gains prometheus and `vendor/` grows visibly, for six series.
+2. **The spec's own argument for the hand-rolled version is recorded and overruled.** Six counters in the text exposition format really are `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly forty lines with no `go.mod` change. The user's decision, recorded in the spec, is the library — and the plan states the reason on its own terms rather than deferring: a hand-rolled exposition is forty lines every reviewer must check for escaping and `# TYPE` ordering before trusting. The cost is named in Task 1's commit: `go.mod` and `go.sum` gain prometheus and its transitive set, for six series. `vendor/` grows too, but locally only — it is gitignored, so the diff a reviewer sees is the module lines.
 
 3. **DECLINED — a readiness probe on the new port.** The port makes one nearly free and `make deploy`'s `rollout status` would start meaning something. It is still a behaviour change to the Deployment that the spec did not ask for, in a plan about metrics. Worth doing; worth doing deliberately, somewhere else.
 
