@@ -261,25 +261,63 @@ out forever. Setting it is also not a one-way door — `kubectl annotate --overw
 whereas a reverting undo that always exempted would make re-hardening an annotation-editing
 exercise across every target.
 
-### BR-U10 — A live object of the other kind over the same namespace is refused
+### BR-U10 — Hardening stands down while an undo is live over the same namespace
 
-Two objects writing opposite patches to the same targets in the same pass is the one interaction
-that cannot be allowed to resolve itself. Each pass invalidates the other's published plan, so
-every hash churns on every resync and nothing is ever approvable; if both are armed, the same
-pods roll twice per round trip.
+**The failure is a loop, not just churn.** A `WorkloadHardening` H and a `WorkloadUndo` U both
+naming `harden-a`: U reverts `api`, so its gaps reopen; H's next pass sees a genuine gap (BR-01
+judges effective values, and they are absent again) and publishes a hash for it; H is armed, so
+it re-patches; U's next pass sees the provenance annotation back and plans the revert again.
+Every round trip rolls every pod of every affected target **twice**. With only one side armed it
+degrades to the milder version — the unarmed side's published plan flips between "no row" and "a
+row" on alternate passes, so the operator's copied hash dangles or goes `Stale` for reasons
+nothing in status explains.
 
-A `WorkloadUndo` is `Rejected` while any `WorkloadHardening` naming an overlapping namespace is
-not `Applied`, and the reverse. `Applied` is the point after which an object writes nothing
-without a new generation, so it is the correct line, and `Rejected` is non-terminal (FR-05), so
-both clear themselves the moment the other finishes — no lock to release and no stale object to
-delete.
+**Object-level refusal, not target-level skipping.** The tempting shape is the one you describe:
+have hardening's `discover` drop the targets an undo is currently reverting. It is the worse of
+the two:
 
-Deliberately **not** the same as 001's BR-03 exclusivity. Existence is not the test: an undo that
-reached `Applied` sits in the cluster forever with no finalizer to clean it up, and using its
-presence as a lock would turn a finished request into a permanent policy over those namespaces.
+- It makes H's plan depend on U's **status**, and 002 already treats published status as
+  something that can be lost — BR-07's whole `Stale`-degrades-to-`Unapproved` argument exists
+  because `status.plan` is not a reliable memory.
+- It depends on U's **timing**. A freshly created U has published no plan, so H sees nothing to
+  skip and proceeds; the race it was meant to close is still open on the pass that matters.
+- It makes H's published hashes non-deterministic, since which targets are in the plan now
+  depends on when another object last reconciled.
 
-**This requires a matching check in 002**, whose FR-05 validation knows nothing about the other
-kind. It is the only amendment to an implemented spec this document asks for.
+Refusal needs none of that: it is decided from `spec.namespaces` on both objects — a set
+intersection, no status, no plan, no timing — and it is the shape 002's validation already uses
+for preconditions, which FR-05 makes explicitly all-or-nothing across namespaces.
+
+**Asymmetric: only hardening checks, and the undo ignores hardening entirely.** Making it
+symmetric deadlocks. `Rejected` is not `Applied`, so two objects created together each see a
+non-`Applied` counterpart, each rejects, and neither can ever reach a phase that releases the
+other. Precedence to the undo breaks the cycle by construction, and it is the right way round:
+an undo is a corrective action taken because something is broken, hardening is elective, and
+when both are present the operator's live intent is to stop the damage.
+
+So: **a `WorkloadHardening` is `Rejected` while any `WorkloadUndo` that is not `Applied` names
+one of its namespaces.** `Applied` is the point after which an object writes nothing without a
+new generation, so it is the correct line, and `Rejected` is non-terminal (FR-05), so H recovers
+by itself on the resync after U finishes — no lock to release, no stale object to delete.
+
+**Runtime cost is nothing.** Both kinds are already served by one process, one queue and one
+worker (FR-U05), so the check reads the undo informer's cache that reconciling undos requires
+anyway: no extra API call per pass, and no RBAC beyond the `workloadundos` access FR-U01 already
+needs. The rejection message names the undo object and the overlapping namespace.
+
+**The stall, stated rather than hidden.** A U that never reaches `Applied` — one target
+permanently blocked by BR-U04, holding it in `PartiallyApplied` — blocks hardening of those
+namespaces until someone deletes it. Accepted: the rejection names the object, deleting it is
+one command, and a live undo the operator has not resolved is a poor moment to start hardening
+the same namespaces.
+
+Deliberately **not** 001's BR-03 exclusivity. Existence is not the test: an undo that reached
+`Applied` sits in the cluster forever with no finalizer to clean it up, and using its presence as
+a lock would turn a finished request into permanent policy over those namespaces.
+
+**All of this lives in 002, and none of it in the undo controller.** It is the only amendment to
+an implemented spec this document asks for — one check in `HardeningReconciler.validate`, one
+error case, one acceptance criterion.
 
 ## Functional requirements
 
@@ -362,6 +400,10 @@ and sharing the vocabulary shares the rendering code. The per-target outcome rep
 with **`Reverted`**, which is the one place the direction is visible and the one place a wrong
 word would mislead.
 
+An undo whose plan is **empty** is `Applied`, not `Previewed`: there is nothing to approve and
+the request is complete, and BR-U10 makes the difference load-bearing rather than cosmetic —
+anything short of `Applied` holds hardening off those namespaces.
+
 New finding reasons: `EditedSinceHardening`, `BlockedByPodSecurity`, `BlockedByLimitRange`,
 `NoRecord`. A `Reverted` row is retained across later passes for FR-06's reason: the target
 drops out of the recomputed plan once its annotation is gone.
@@ -398,7 +440,8 @@ drops out of the recomputed plan once its annotation is gone.
 | AC-U12 | The CRD installs and the API server rejects an empty namespace list and an edit to any field but `approvedPlan`, `exempt` included                                                     | Script   |
 | AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no API calls; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it | Unit     |
 | AC-U14 | `exempt: true` writes `hardening.acme.corp/skip` in the same patch as the revert, and a later WorkloadHardening reports that target excluded rather than planning it; `exempt: false` leaves no annotation behind | Unit     |
-| AC-U15 | Overlap: an undo is `Rejected` while a non-`Applied` WorkloadHardening names one of its namespaces, and the reverse; each reaches `Previewed` on the resync after the other reaches `Applied` | Unit     |
+| AC-U15 | **Overlap:** a WorkloadHardening is `Rejected` while a non-`Applied` WorkloadUndo names one of its namespaces, and reaches `Previewed` on the resync after that undo is `Applied`; an undo naming a namespace a live hardening also names is **not** rejected; two objects created together do not deadlock | Unit     |
+| AC-U16 | An undo whose plan is empty reaches `Applied` rather than `Previewed`, and does not hold off a hardening of the same namespaces | Unit     |
 
 **AC-U03 and AC-U04 are the two most easily got wrong**, and they fail in opposite ways. AC-U03
 fails at the dry-run, loudly, on every target — an undo that never works. AC-U04 passes the
@@ -409,7 +452,7 @@ namespace scope.
 
 | Case                                                          | Behaviour                                                                                                     |
 | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| No workload in any named namespace carries the annotation     | `Previewed` with an empty plan and a message saying so; not an error                                            |
+| No workload in any named namespace carries the annotation     | `Applied` immediately, with a message saying so; not an error. **Terminal on purpose:** `Previewed` is not `Applied`, so an empty undo left sitting in `Previewed` would block hardening of those namespaces forever under BR-U10 |
 | A record's live value was edited                              | Skipped, reported `EditedSinceHardening`, left in the rewritten annotation                                      |
 | The namespace enforces `restricted`                           | The four PSS fields skipped and reported; requests still removed; both recorded in the rewritten annotation     |
 | A LimitRange `min` with no default covers a recorded request  | That request skipped, reported `BlockedByLimitRange`                                                            |
