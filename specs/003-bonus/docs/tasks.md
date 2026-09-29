@@ -48,7 +48,7 @@ A fourth, handled rather than listed: a documented `make` target that no longer 
 | `docs/how-to.md` | How-to | Six goals an operator actually has, each one sentence of when, the commands in full, and one sentence of when not. Sections, not files. |
 | `docs/tutorial.md` | Tutorial | One path: cluster, isolation, hardening, approval, undo, release, teardown. No choices in it. |
 | `specs/` | Explanation | Already written. Linked, never restated. |
-| `README.md` | — | **Rewritten** as a router: what this is, four links, requirements, one Time spent table, the feedback section. |
+| `README.md` | — | **Rewritten** as a router: what this is, four links, requirements. |
 | `.github/workflows/ci.yml` | — | **Modified.** Two drift checks in the `unit` job: documented identifiers exist, documented `make` targets exist. |
 
 ---
@@ -423,7 +423,7 @@ Expected: `would fail on: invented-target`.
 
 - [ ] **Step 5: Rewrite the README as a router**
 
-Replace `README.md` entirely. The duplication the Refactor section describes — `# core task 2` inside `## Setup`, and 135 lines mirroring Decisions, Limitations, What I'd do and Time spent once per core task — goes away because those sections move to where they belong, not because they are merged:
+Replace `README.md` entirely. The duplication the Refactor section describes — `# core task 2` inside `## Setup`, and lines 241–340 mirroring Decisions and Limitations a second time for core task 2 — goes away because those sections move to where they belong, not because they are merged:
 
 ```markdown
 # k8s-workload-hardening
@@ -441,17 +441,9 @@ and taking approval per workload. `WorkloadHardeningUndo` takes the second one b
 ## Requirements
 
 [versions table, moved verbatim from the current ## Tested versions]
-
-## Time spent
-
-[ONE table, both core tasks and the bonus as rows — merged from the two the current README carries]
-
-## Feedback on the brief
-
-[moved verbatim]
 ```
 
-Decisions, Limitations and What I'd do with more time do **not** move into the router. They are explanation, they are already in `specs/` in more detail and better argued, and keeping a second shorter copy in the README is the exact duplication this whole item exists to end. The router links to `specs/`; if a reviewer needs a summary, the specs' own "Out of scope" tables are it.
+Decisions and Limitations do **not** move into the router. They are explanation, they are already in `specs/` in more detail and better argued, and keeping a second shorter copy in the README is the exact duplication this whole item exists to end. The router links to `specs/`; if a reviewer needs a summary, the specs' own "Out of scope" tables are it.
 
 - [ ] **Step 6: Verify the router is a router**
 
@@ -460,13 +452,13 @@ wc -l README.md
 grep -c '^## ' README.md
 ```
 
-Expected: under 60 lines and four or fewer `##` sections. A README that grows past that is becoming a fifth document, which is where this started.
+Expected: under 60 lines and two or fewer `##` sections. A README that grows past that is becoming a fifth document, which is where this started.
 
 - [ ] **Step 7: Verify nothing was lost**
 
 ```bash
 git show HEAD~1:README.md > /tmp/readme-old.md
-grep -oE '^\| [0-9].*' /tmp/readme-old.md | head
+grep -nE '^#+ ' /tmp/readme-old.md
 ```
 
 Read the old Decisions and Limitations sections one last time and confirm each point exists in `specs/`. Anything that does **not** is a fact about the project that was only ever in the README — move it into the relevant spec's Out of scope or Deferred table and say so in the commit, or keep it in the router. Do not delete it.
@@ -495,7 +487,7 @@ and produces a router rather than a longer document — which is what the
 Documentation section of the spec says it should, and doing it in the refactor
 plan would have meant writing the README twice.
 
-Decisions, Limitations and What I'd do with more time do not survive into it.
+Decisions and Limitations do not survive into it.
 They are explanation, they are in specs/ in more detail and better argued, and
 a second shorter copy is the duplication this item exists to end. Step 7 checks
 each point exists there before it goes.
@@ -521,10 +513,18 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 1. **The README merge moves here from the Refactor section.** The spec asks for it there and then, in its Documentation section, says the merge should produce a **router** rather than a longer document — because the README trying to be all four modes at once is the mechanism behind the duplication in the first place. Doing it in the refactor plan would mean writing the README twice. The duplication is still removed, by relocation rather than by merging.
 
-2. **Decisions, Limitations and What I'd do with more time do not survive into the router.** They are explanation; they are in `specs/` in more detail and better argued; and a second shorter copy is the exact duplication this item exists to end. Task 3, Step 7 reads the old sections one last time and requires every point to be findable in `specs/` before it goes — anything that is not gets moved into the relevant spec's Out of scope or Deferred table, or kept. Nothing is deleted on the assumption it is elsewhere. **This is the item most worth a second opinion:** a reviewer who expects a self-contained README will find the new one thin, and that is deliberate rather than accidental.
+2. **Decisions and Limitations do not survive into the router.** They are explanation; they are in `specs/` in more detail and better argued; and a second shorter copy is the exact duplication this item exists to end. Task 3, Step 7 reads the old sections one last time and requires every point to be findable in `specs/` before it goes — anything that is not gets moved into the relevant spec's Out of scope or Deferred table, or kept. Nothing is deleted on the assumption it is elsewhere. **This is the item most worth a second opinion:** a reviewer who expects a self-contained README will find the new one thin, and that is deliberate rather than accidental.
 
 3. **The reference's Metrics section is conditional.** If the metrics plan has not landed, delete that section rather than documenting an endpoint that does not answer. The drift check does not cover metric names — they live in `pkg/metrics`, not `pkg/apis/v1alpha1` — so the metrics plan's own CI assertion is what protects them.
 
 4. **Six how-to sections, not more.** Each is a goal somebody has mid-incident. The temptation is to add one per business rule, which would make the document a second reference and reintroduce the mixing this plan exists to end. If a seventh is genuinely needed, it replaces one rather than joining it.
 
 5. **The tutorial is verified by a human pasting it, not by a script.** Task 3, Step 2 says so explicitly. A script would paper over a missing `kubectl wait` — the reader would hit a race the CI never sees — and the claim the tutorial makes is precisely that somebody typing these commands gets this result.
+
+6. **Time spent and Feedback on the brief are not in the router, and are not coming back.** An
+   earlier draft of this plan moved both into the README verbatim. Both sections — and every
+   "What I'd do with more time" — were since removed from the README and from all of history at
+   the author's request, and force-pushed; the author keeps that content privately. The
+   instruction to move them "from the current README" pointed at a source that no longer exists,
+   so Steps 5 and 7 no longer ask for them. This is settled, not open: do not reintroduce either
+   section on the authority of an older draft.

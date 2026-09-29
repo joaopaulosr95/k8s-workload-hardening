@@ -72,9 +72,9 @@ it — so it is a decision rather than a rename, and skipping it costs nothing b
 name.
 
 **Docs.** The README was written for 001 and 002 was appended: `# core task 2` sits at line 54
-inside `## Setup`, and lines 269–403 duplicate the whole structure (Decisions, Limitations,
-What I'd do, Time spent at 297/334/363/391 mirroring 98/166/200/263). Merge per topic, with
-both features in each section and a single Time spent table. One pass, one decision.
+inside `## Setup`, and lines 241–340 duplicate the structure a second time (Decisions and
+Limitations at 269/306 mirroring 101/169). Merge per topic, with both features in each
+section. One pass, one decision.
 
 Operator-facing text counts as docs here: `deploy/crd-hardening.yaml` describes the kind with
 "There is no undo.", which `kubectl explain` prints and which this feature makes false. It goes
