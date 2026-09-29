@@ -230,6 +230,57 @@ radius as BR-02's table, reported per target as BR-09 requires.
   request to the limit, because Kubernetes copies limits into absent requests when defaulting
   the Pod. Correct, and not obvious: the undo of a 10m request can be a 500m reservation.
 
+### BR-U09 — After an undo, nothing re-hardens by itself, and nothing is permanent either
+
+An undone workload has absent effective values again, so BR-01 sees a genuine gap and 002 would
+fill it. What stops that today is not a rule about the workload — it is FR-05's generation gate:
+an `Applied` object whose `observedGeneration` equals its `metadata.generation` issues no API
+calls at all (AC-14). The protection is a property of the request's lifecycle, and it has one
+realistic hole.
+
+FR-01 approves a large plan in batches against the same object, and FR-05's gate exists so an
+`Applied` object picks the next batch up. The moment anyone edits `approvedPlan`, the plan is
+recomputed and the undone target reappears in it with a **new hash**. It is `Unapproved`, so
+nothing is written without approval — but it is one blanket copy-paste of the published hashes
+away from being re-hardened. A deleted-and-recreated hardening object, or a second object naming
+the namespace (G-03), reaches the same place from `Pending`.
+
+**So an undo is a point-in-time correction, not an exemption, and the spec says so rather than
+implying otherwise.** The exemption mechanism already exists and is 002's:
+`hardening.acme.corp/skip: "true"` (BR-04), the escape hatch for a workload that genuinely needs
+what the policy would take away — which is exactly what a workload someone undid has just
+demonstrated.
+
+`spec.exempt: true` on the undo object writes that annotation onto every target it reverts, **in
+the same patch**. It costs nothing: BR-U05 is already rewriting `metadata.annotations` in that
+request, so it is one more key and no extra API call and no window between the two writes.
+
+It defaults to **false**, because reverting a change and refusing all future ones are different
+decisions and an operator undoing a single bad rollout should not silently opt those namespaces
+out forever. Setting it is also not a one-way door — `kubectl annotate --overwrite` removes it —
+whereas a reverting undo that always exempted would make re-hardening an annotation-editing
+exercise across every target.
+
+### BR-U10 — A live object of the other kind over the same namespace is refused
+
+Two objects writing opposite patches to the same targets in the same pass is the one interaction
+that cannot be allowed to resolve itself. Each pass invalidates the other's published plan, so
+every hash churns on every resync and nothing is ever approvable; if both are armed, the same
+pods roll twice per round trip.
+
+A `WorkloadUndo` is `Rejected` while any `WorkloadHardening` naming an overlapping namespace is
+not `Applied`, and the reverse. `Applied` is the point after which an object writes nothing
+without a new generation, so it is the correct line, and `Rejected` is non-terminal (FR-05), so
+both clear themselves the moment the other finishes — no lock to release and no stale object to
+delete.
+
+Deliberately **not** the same as 001's BR-03 exclusivity. Existence is not the test: an undo that
+reached `Applied` sits in the cluster forever with no finalizer to clean it up, and using its
+presence as a lock would turn a finished request into a permanent policy over those namespaces.
+
+**This requires a matching check in 002**, whose FR-05 validation knows nothing about the other
+kind. It is the only amendment to an implemented spec this document asks for.
+
 ## Functional requirements
 
 ### FR-U01 — Interface
@@ -249,12 +300,14 @@ metadata:
   namespace: isolation-system
 spec:
   namespaces: [tenant-a, tenant-b]
+  exempt: false # optional; default false. Annotate reverted targets skip=true (BR-U09)
   approvedPlan: [] # empty => preview only; the only mutable field
 ```
 
 `namespaces` holds 1–16 unique DNS labels. There is no policy block: what to remove is on the
 workloads. `approvedPlan` holds up to 128 twelve-character hex hashes and is the only mutable
-field, by the same CEL transition rule as 001 and 002.
+field, by the same CEL transition rule as 001 and 002 — `exempt` is immutable with the rest,
+because it changes what the approved hashes describe.
 
 ### FR-U02 — The inverse plan
 
@@ -342,7 +395,10 @@ drops out of the recomputed plan once its annotation is gone.
 | AC-U09 | Preview writes nothing, publishes a hash per target, and a target whose recorded field a human edits between preview and apply is `Stale`                                               | Unit     |
 | AC-U10 | A workload deleted and recreated after hardening carries no annotation and yields no target                                                                                             | Unit     |
 | AC-U11 | On kind: harden a Deployment, approve, apply, undo, approve, apply — the rollout completes twice, the pods stay Ready, and QoS returns to `BestEffort`                                  | Script   |
-| AC-U12 | The CRD installs and the API server rejects an empty namespace list and an edit to any field but `approvedPlan`                                                                         | Script   |
+| AC-U12 | The CRD installs and the API server rejects an empty namespace list and an edit to any field but `approvedPlan`, `exempt` included                                                     | Script   |
+| AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no API calls; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it | Unit     |
+| AC-U14 | `exempt: true` writes `hardening.acme.corp/skip` in the same patch as the revert, and a later WorkloadHardening reports that target excluded rather than planning it; `exempt: false` leaves no annotation behind | Unit     |
+| AC-U15 | Overlap: an undo is `Rejected` while a non-`Applied` WorkloadHardening names one of its namespaces, and the reverse; each reaches `Previewed` on the resync after the other reaches `Applied` | Unit     |
 
 **AC-U03 and AC-U04 are the two most easily got wrong**, and they fail in opposite ways. AC-U03
 fails at the dry-run, loudly, on every target — an undo that never works. AC-U04 passes the
@@ -363,6 +419,8 @@ namespace scope.
 | A dry-run warning names a Pod Security violation              | Reported as a finding on that target alongside whatever the `enforce` check decided                             |
 | The undo's own rollout halts                                  | Not detected, as in 002's G-02. `Applied` means the API server accepted the patch                               |
 | The workload was patched by two `WorkloadHardening` objects   | Only the second object's records exist to undo. G-U01                                                           |
+| A non-`Applied` `WorkloadHardening` names an overlapping namespace | `Rejected`, naming the object and the namespace. Non-terminal, so it clears itself once that object is `Applied` (BR-U10) |
+| A hardening object's `approvedPlan` is edited after an undo   | The undone target reappears in its plan with a new hash, as `Unapproved`. Not patched, but re-approvable — BR-U09, and the reason `exempt` exists |
 
 ## Out of scope
 
