@@ -45,7 +45,7 @@ func (r *IsolationReconciler) Reconcile(ctx context.Context, key string) error {
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 
-	u, err := r.Dyn.Resource(v1alpha1.Resource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	u, err := r.Dyn.Resource(v1alpha1.IsolationResource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		// Gone, and the finalizer guaranteed cleanup ran before it went.
 		return nil
@@ -206,7 +206,7 @@ func (r *IsolationReconciler) setStatus(ctx context.Context, iso *v1alpha1.Netwo
 	if err != nil {
 		return err
 	}
-	out, err := r.Dyn.Resource(v1alpha1.Resource).Namespace(iso.Namespace).UpdateStatus(ctx, u, metav1.UpdateOptions{})
+	out, err := r.Dyn.Resource(v1alpha1.IsolationResource).Namespace(iso.Namespace).UpdateStatus(ctx, u, metav1.UpdateOptions{})
 	if err != nil {
 		return err
 	}
@@ -236,7 +236,7 @@ func (r *IsolationReconciler) patchFinalizers(ctx context.Context, iso *v1alpha1
 	if err != nil {
 		return err
 	}
-	out, err := r.Dyn.Resource(v1alpha1.Resource).Namespace(iso.Namespace).
+	out, err := r.Dyn.Resource(v1alpha1.IsolationResource).Namespace(iso.Namespace).
 		Patch(ctx, iso.Name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil {
 		return err

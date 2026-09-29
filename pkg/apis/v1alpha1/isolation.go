@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	GroupName = "hardening.acme.corp"
-	Version   = "v1alpha1"
-	Kind      = "NetworkIsolation"
+	GroupName     = "hardening.acme.corp"
+	Version       = "v1alpha1"
+	IsolationKind = "NetworkIsolation"
 
 	// Finalizer is persisted before the first policy write, so cleanup is
 	// guaranteed a chance to run (FR-03).
@@ -26,11 +26,12 @@ const (
 	OwnerAnnotation = "hardening.acme.corp/owner"
 )
 
-// Resource is the GVR the dynamic client uses for NetworkIsolation objects.
-var Resource = schema.GroupVersionResource{Group: GroupName, Version: Version, Resource: "networkisolations"}
+// IsolationResource is the GVR the dynamic client uses for NetworkIsolation
+// objects.
+var IsolationResource = schema.GroupVersionResource{Group: GroupName, Version: Version, Resource: "networkisolations"}
 
-// GroupVersionKind stamps unstructured objects on the way out.
-var GroupVersionKind = schema.GroupVersionKind{Group: GroupName, Version: Version, Kind: Kind}
+// IsolationGroupVersionKind stamps unstructured objects on the way out.
+var IsolationGroupVersionKind = schema.GroupVersionKind{Group: GroupName, Version: Version, Kind: IsolationKind}
 
 // Phase is the coarse state reported in status (FR-05).
 type Phase string
@@ -98,6 +99,6 @@ func ToUnstructured(iso *NetworkIsolation) (*unstructured.Unstructured, error) {
 		return nil, err
 	}
 	u := &unstructured.Unstructured{Object: m}
-	u.SetGroupVersionKind(GroupVersionKind)
+	u.SetGroupVersionKind(IsolationGroupVersionKind)
 	return u, nil
 }

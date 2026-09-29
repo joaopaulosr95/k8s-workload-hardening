@@ -16,7 +16,7 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 	now := metav1.Now()
 	in := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": GroupName + "/" + Version,
-		"kind":       Kind,
+		"kind":       IsolationKind,
 		"metadata": map[string]any{
 			"name":              "gateway-dashboard",
 			"namespace":         "isolation-system",
@@ -62,7 +62,7 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToUnstructured: %v", err)
 	}
-	if out.GetKind() != Kind || out.GetAPIVersion() != GroupName+"/"+Version {
+	if out.GetKind() != IsolationKind || out.GetAPIVersion() != GroupName+"/"+Version {
 		t.Errorf("GVK = %s %s", out.GetAPIVersion(), out.GetKind())
 	}
 	if out.GetUID() != iso.UID {
@@ -103,7 +103,7 @@ func TestZeroCountsAreSerialised(t *testing.T) {
 func TestFromUnstructuredRejectsMalformedObject(t *testing.T) {
 	in := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": GroupName + "/" + Version,
-		"kind":       Kind,
+		"kind":       IsolationKind,
 		"metadata":   map[string]any{"name": "bad", "namespace": "isolation-system"},
 		"spec": map[string]any{
 			"peers": []any{map[string]any{"namespace": int64(42)}}, // namespace is a string

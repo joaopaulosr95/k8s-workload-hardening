@@ -29,14 +29,14 @@ func dynClient(t *testing.T, iso *v1alpha1.NetworkIsolation) *dynamicfake.FakeDy
 		t.Fatalf("ToUnstructured: %v", err)
 	}
 	scheme := runtime.NewScheme()
-	scheme.AddKnownTypeWithName(v1alpha1.GroupVersionKind, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(v1alpha1.IsolationGroupVersionKind, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(
-		v1alpha1.GroupVersionKind.GroupVersion().WithKind(v1alpha1.Kind+"List"),
+		v1alpha1.IsolationGroupVersionKind.GroupVersion().WithKind(v1alpha1.IsolationKind+"List"),
 		&unstructured.UnstructuredList{})
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		scheme,
 		map[schema.GroupVersionResource]string{
-			v1alpha1.Resource:          v1alpha1.Kind + "List",
+			v1alpha1.IsolationResource: v1alpha1.IsolationKind + "List",
 			v1alpha1.HardeningResource: v1alpha1.HardeningKind + "List",
 		},
 		u,
@@ -46,7 +46,7 @@ func dynClient(t *testing.T, iso *v1alpha1.NetworkIsolation) *dynamicfake.FakeDy
 // stored reads the object back out of the fake dynamic client.
 func stored(t *testing.T, r *IsolationReconciler, iso *v1alpha1.NetworkIsolation) *v1alpha1.NetworkIsolation {
 	t.Helper()
-	u, err := r.Dyn.Resource(v1alpha1.Resource).Namespace(iso.Namespace).Get(context.Background(), iso.Name, metav1.GetOptions{})
+	u, err := r.Dyn.Resource(v1alpha1.IsolationResource).Namespace(iso.Namespace).Get(context.Background(), iso.Name, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("reading back the object: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestConflictOnStatusWriteRequeues(t *testing.T) {
 		if conflict && a.GetSubresource() == "status" {
 			conflict = false
 			return true, nil, apierrors.NewConflict(
-				v1alpha1.Resource.GroupResource(), object.Name, errors.New("the object has been modified"))
+				v1alpha1.IsolationResource.GroupResource(), object.Name, errors.New("the object has been modified"))
 		}
 		return false, nil, nil
 	})

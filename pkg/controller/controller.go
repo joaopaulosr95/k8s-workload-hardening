@@ -105,13 +105,13 @@ func New(
 	c := &Controller{
 		queue: workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		reconcile: map[string]func(context.Context, string) error{
-			v1alpha1.Resource.Resource:          iso.Reconcile,
+			v1alpha1.IsolationResource.Resource: iso.Reconcile,
 			v1alpha1.HardeningResource.Resource: hardening.Reconcile,
 		},
 	}
 
 	crFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, resync, metav1.NamespaceAll, nil)
-	for _, gvr := range []schema.GroupVersionResource{v1alpha1.Resource, v1alpha1.HardeningResource} {
+	for _, gvr := range []schema.GroupVersionResource{v1alpha1.IsolationResource, v1alpha1.HardeningResource} {
 		resource := gvr.Resource
 		informer := crFactory.ForResource(gvr).Informer()
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -196,6 +196,6 @@ func (c *Controller) enqueuePolicy(obj any) {
 		return
 	}
 	if key, ok := ownerKey(meta); ok {
-		c.queue.Add(queueKey(v1alpha1.Resource.Resource, key))
+		c.queue.Add(queueKey(v1alpha1.IsolationResource.Resource, key))
 	}
 }

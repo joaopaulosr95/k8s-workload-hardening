@@ -47,7 +47,7 @@ func hardeningDynClient(t *testing.T, w *v1alpha1.WorkloadHardening) *dynamicfak
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
-			v1alpha1.Resource:          v1alpha1.Kind + "List",
+			v1alpha1.IsolationResource: v1alpha1.IsolationKind + "List",
 			v1alpha1.HardeningResource: v1alpha1.HardeningKind + "List",
 		},
 		u,
@@ -462,7 +462,7 @@ func TestUnreadableSpecIsRejectedNotRetriedForever(t *testing.T) {
 	r.Dyn = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
-			v1alpha1.Resource:          v1alpha1.Kind + "List",
+			v1alpha1.IsolationResource: v1alpha1.IsolationKind + "List",
 			v1alpha1.HardeningResource: v1alpha1.HardeningKind + "List",
 		},
 		broken,
@@ -1286,7 +1286,7 @@ func TestUnreadableSpecIsNotRewrittenOnEveryResync(t *testing.T) {
 	r.Dyn = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
-			v1alpha1.Resource:          v1alpha1.Kind + "List",
+			v1alpha1.IsolationResource: v1alpha1.IsolationKind + "List",
 			v1alpha1.HardeningResource: v1alpha1.HardeningKind + "List",
 		},
 		broken,
