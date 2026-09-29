@@ -2,7 +2,10 @@ TAG ?= dev
 IMAGE ?= ghcr.io/joaopaulosr95/k8s-workload-hardening
 CLUSTER ?= hardening
 
-.PHONY: test cover image kind-up kind-down deploy samples verify verify-crd verify-crd-hardening samples-hardening verify-hardening
+.PHONY: test cover image kind-up kind-down deploy \
+        samples-isolation verify-isolation verify-crd-isolation \
+        samples-hardening verify-hardening verify-crd-hardening \
+        verify verify-crd
 
 test:
 	go test ./pkg/... -race
@@ -10,6 +13,7 @@ test:
 cover:
 	go test ./pkg/... -coverprofile=coverage.out
 	go tool cover -func=coverage.out | tail -1
+	@go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$$3); if ($$3+0 < 90) {printf "coverage %s%% is below the 90%% floor in AGENTS.md\n", $$3; exit 1}}'
 
 image:
 	docker build -t $(IMAGE):$(TAG) .
@@ -29,20 +33,17 @@ deploy: image
 	kubectl -n isolation-system rollout restart deployment/network-isolation
 	kubectl -n isolation-system rollout status deployment/network-isolation --timeout=120s
 
-samples:
+samples-isolation:
 	kubectl apply -f deploy/samples/workloads.yaml
 	kubectl -n tenant-a wait --for=condition=Ready pod/gateway --timeout=120s
 	kubectl -n tenant-b wait --for=condition=Ready pod/dashboard --timeout=120s
 	kubectl -n tenant-c wait --for=condition=Ready pod/bystander --timeout=120s
 
-verify: deploy samples
+verify-isolation: deploy samples-isolation
 	./hack/verify-isolation.sh
 
-verify-crd:
-	./hack/verify-crd.sh
-
-verify-crd-hardening:
-	./hack/verify-crd-hardening.sh
+verify-crd-isolation:
+	./hack/verify-crd-isolation.sh
 
 samples-hardening:
 	# From a clean slate: the tool's own annotations and patches survive a
@@ -58,3 +59,13 @@ samples-hardening:
 
 verify-hardening: deploy samples-hardening
 	./hack/verify-hardening.sh
+
+verify-crd-hardening:
+	./hack/verify-crd-hardening.sh
+
+# Both features in one invocation. make runs `deploy` once however many targets
+# name it, so the image is built and loaded a single time — which is what the
+# CI job in specs/003-bonus/spec.md needs.
+verify: verify-isolation verify-hardening
+
+verify-crd: verify-crd-isolation verify-crd-hardening

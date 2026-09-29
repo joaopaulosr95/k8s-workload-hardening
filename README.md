@@ -45,16 +45,19 @@ order carries no meaning beyond indexing the two generated policies.
 ```bash
 make kind-up      # kind cluster, default CNI (enforces NetworkPolicy)
 make deploy       # build image, load it, install CRD + RBAC + controller
-make samples      # three namespaces with probe pods
-make verify       # AC-07: live TCP/UDP traffic, before / after / removed
-make verify-crd   # AC-09: API-server schema and immutability
-make test         # unit tests, race detector
-make cover        # coverage
+make samples-isolation      # three namespaces with probe pods
+make verify-isolation       # AC-07: live TCP/UDP traffic, before / after / removed
+make verify-crd-isolation   # AC-09: API-server schema and immutability
+make test                   # unit tests, race detector
+make cover                  # coverage, and the 90% floor AGENTS.md asks for
 
 # core task 2
 make samples-hardening      # harden-a and harden-b: five Deployments, one LimitRange
 make verify-hardening       # AC-15: preview, approve, apply, rollout, QoS, provenance
 make verify-crd-hardening   # AC-16: API-server schema and per-field immutability
+
+make verify                 # both features
+make verify-crd             # both CRD suites
 ```
 
 ## Tested versions
