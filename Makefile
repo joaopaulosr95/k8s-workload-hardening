@@ -36,7 +36,7 @@ kind-down:
 
 deploy: image
 	kind load docker-image $(IMAGE):$(TAG) --name $(CLUSTER)
-	$(KUBECTL) apply -f deploy/crd.yaml
+	$(KUBECTL) apply -f deploy/crd-isolation.yaml
 	$(KUBECTL) apply -f deploy/crd-hardening.yaml
 	$(KUBECTL) apply -f deploy/rbac.yaml
 	$(KUBECTL) apply -f deploy/controller.yaml

@@ -191,7 +191,7 @@ Expected: both jobs pass. This is the only task in the plan whose deliverable ca
 - Modify: `go.mod`, `go.sum`, `.gitignore`, `Makefile`, `.github/workflows/ci.yml` (`vendor/` is regenerated locally and is not tracked)
 
 **Interfaces:**
-- Consumes: `deploy/crd.yaml`, `deploy/crd-hardening.yaml` (both shipped), and `deploy/crd-undo.yaml` from the undo plan's Task 4.
+- Consumes: `deploy/crd-isolation.yaml`, `deploy/crd-hardening.yaml` (both shipped), and `deploy/crd-undo.yaml` from the undo plan's Task 4.
 - Produces: `make envtest-assets`, `make test-envtest`, and a step in Task 1's `unit` job. Nothing else reads them.
 
 This **replaces** the third CRD script. One mechanism per question: `hack/verify-crd-isolation.sh` and `hack/verify-crd-hardening.sh` stay because they are written, passing, and assert the installed-and-served path rather than the schema — but their **cases** are ported here, and no `hack/verify-crd-undo.sh` is written.
@@ -291,7 +291,7 @@ func TestMain(m *testing.M) {
 	env := &envtest.Environment{
 		CRDInstallOptions: envtest.CRDInstallOptions{
 			Paths: []string{
-				filepath.Join("..", "..", "deploy", "crd.yaml"),
+				filepath.Join("..", "..", "deploy", "crd-isolation.yaml"),
 				filepath.Join("..", "..", "deploy", "crd-hardening.yaml"),
 				filepath.Join("..", "..", "deploy", "crd-undo.yaml"),
 			},

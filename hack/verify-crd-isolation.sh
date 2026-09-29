@@ -41,7 +41,7 @@ expect_reject() {
   fi
 }
 
-kubectl apply -f deploy/crd.yaml >/dev/null
+kubectl apply -f deploy/crd-isolation.yaml >/dev/null
 kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 expect_reject "only one peer supplied" "should have at least 2 items" <<EOF
