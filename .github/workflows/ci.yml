@@ -30,6 +30,40 @@ jobs:
       - name: Coverage floor
         run: make cover
 
+      - name: Reference documentation names things that exist
+        run: |
+          set -euo pipefail
+          fail=0
+          # Only the two tables that list API constants. Scoping matters: the
+          # Custom resources table also starts rows with a backticked
+          # CamelCase word, and an unscoped sweep would demand a Phase named
+          # NetworkIsolation.
+          section() { awk -v s="$1" '$0=="## "s{f=1;next} /^## /{f=0} f' docs/reference.md; }
+
+          # Every hardening.acme.corp/* key the reference names must be a
+          # constant in the API package. A documented key that no longer
+          # exists is the failure that matters, because a reader cannot notice.
+          # [a-z0-9-]+ then drop the apiVersion: a [a-z-]+ class stops at the
+          # digit in hardening.acme.corp/v1alpha1 and demands a constant named
+          # for the truncated "hardening.acme.corp/v".
+          for k in $(grep -oE 'hardening\.acme\.corp/[a-z0-9-]+' docs/reference.md \
+                     | grep -vE '^hardening\.acme\.corp/v[0-9]' | sort -u); do
+            grep -qrF "\"$k\"" pkg/apis/v1alpha1/ \
+              || { echo "reference names $k, which is no constant in pkg/apis/v1alpha1"; fail=1; }
+          done
+          # [[:space:]]* around the = because gofmt aligns const blocks, and a
+          # single-space regex silently matches nothing at all.
+          for v in $(section Phases | grep -oE '^\| `[A-Za-z]+`' | tr -d '|` '); do
+            grep -qrE "Phase[[:space:]]*=[[:space:]]*\"$v\"" pkg/apis/v1alpha1/ \
+              || { echo "reference names phase $v, which is no constant in pkg/apis/v1alpha1"; fail=1; }
+          done
+          for v in $(section 'Per-target outcomes' | grep -oE '^\| `[A-Za-z]+`' | tr -d '|` '); do
+            grep -qrE "Outcome[A-Za-z]*[[:space:]]*=[[:space:]]*\"$v\"" pkg/apis/v1alpha1/ \
+              || { echo "reference names outcome $v, which is no constant in pkg/apis/v1alpha1"; fail=1; }
+          done
+          [ "$fail" -eq 0 ] && echo "ok: every documented identifier exists"
+          exit "$fail"
+
       - name: CRD schemas and CEL rules (envtest)
         run: |
           set -euo pipefail
