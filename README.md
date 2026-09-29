@@ -321,4 +321,11 @@ never written.
   checkpoint one would work from.
 - **Two requests may name the same namespace**, and the second one's provenance
   annotation replaces the first's.
+- **`create` on `workloadhardenings` is effectively a cluster-wide
+  workload-mutation grant.** The object names its target namespaces in `spec`
+  and may live in a namespace of the operator's choosing, so anyone who can
+  create one anywhere can direct the controller to patch workloads in any
+  non-protected namespace. That is inherent to the interface rather than a
+  defect — protected namespaces and the per-target approval gate are what bound
+  it — but the verb belongs with cluster admins, not with namespace owners.
 
