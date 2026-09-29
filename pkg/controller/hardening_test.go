@@ -342,11 +342,18 @@ func TestDryRunRefusalIsPerTarget(t *testing.T) {
 		return false, nil, nil
 	})
 
-	if err := r.Reconcile(context.Background(), hardeningKey(w)); err == nil {
-		t.Error("want an error so the key is requeued")
+	// FR-03: a refusal during a preview does not requeue. The object stays
+	// Previewed, the row carries the refusal, and the periodic resync retries
+	// it. Returning an error would spin the queue's backoff against a webhook
+	// that may refuse permanently, on behalf of an object nobody armed.
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Errorf("Reconcile = %v, want nil: a preview refusal must not requeue (FR-03)", err)
 	}
 
 	got := storedHardening(t, r, w)
+	if got.Status.Phase != v1alpha1.PhasePreviewed {
+		t.Errorf("phase = %q, want Previewed", got.Status.Phase)
+	}
 	api := rowFor(got, "Deployment", "api")
 	if api.Outcome != v1alpha1.OutcomeFailed {
 		t.Errorf("api outcome = %q, want Failed", api.Outcome)
@@ -1129,5 +1136,70 @@ func TestTransientFailureIsReportedAndRetried(t *testing.T) {
 	}
 	if !strings.Contains(got.Status.Message, "request timed out") {
 		t.Errorf("message = %q, want the cause named", got.Status.Message)
+	}
+}
+
+// NFR-02's load-bearing half: no write before a dry-run of that same patch, in
+// the same pass, has been accepted. TestApplyAlwaysDryRunsFirst proves the
+// happy path issues the dry-run first with the same body; this proves the
+// refusal actually stops the write. Without it, reordering the two blocks — or
+// logging and continuing instead of returning — would leave every other test
+// green while the tool wrote a patch the API server had just refused.
+func TestApplyDoesNotWriteWhenTheDryRunIsRefused(t *testing.T) {
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	hash := rowFor(storedHardening(t, r, w), "Deployment", "api").Hash
+	arm(t, r, w, hash)
+
+	// Refuse the dry-run only. A real write, if one were issued, would be
+	// accepted — so the assertions below are about the tool's own ordering.
+	r.Kube.(*fake.Clientset).ClearActions()
+	r.Kube.(*fake.Clientset).PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if len(a.(k8stesting.PatchActionImpl).PatchOptions.DryRun) == 0 {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: "apps", Kind: "Deployment"}, "api", nil)
+	})
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err == nil {
+		t.Error("Reconcile = nil, want an error so the queue retries: this is an apply, not a preview (FR-04)")
+	}
+
+	patches := patchActions(t, r)
+	if len(patches) != 1 {
+		t.Fatalf("issued %d patches, want exactly 1: the refused dry-run and no write", len(patches))
+	}
+	if len(patches[0].PatchOptions.DryRun) == 0 {
+		t.Error("the one patch issued was not a dry-run; the write went out after a refusal")
+	}
+
+	deploy, err := r.Kube.AppsV1().Deployments("tenant-a").Get(context.Background(), "api", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the target back: %v", err)
+	}
+	if got := deploy.Annotations[v1alpha1.FilledAnnotation]; got != "" {
+		t.Errorf("provenance annotation = %q, want none: nothing was written", got)
+	}
+	if deploy.Spec.Template.Spec.SecurityContext != nil {
+		t.Error("the template was patched although the dry-run refused it")
+	}
+
+	got := storedHardening(t, r, w)
+	row := rowFor(got, "Deployment", "api")
+	if row.Outcome != v1alpha1.OutcomeFailed {
+		t.Errorf("outcome = %q, want Failed", row.Outcome)
+	}
+	if !strings.Contains(row.Reason, "dry-run rejected") {
+		t.Errorf("reason = %q, want it to name the refused dry-run", row.Reason)
+	}
+	if got.Status.Phase != v1alpha1.PhasePartiallyApplied {
+		t.Errorf("phase = %q, want PartiallyApplied", got.Status.Phase)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1"
@@ -286,5 +287,74 @@ func TestDiscoverExcludesAndReports(t *testing.T) {
 	// target, and reporting every replica would drown the status.
 	if reason := findingReason(findings, "Pod", "fine-abc123-xyz"); reason != "" {
 		t.Errorf("an owned pod was reported: %q", reason)
+	}
+}
+
+// rolloutFor returns the rollout mechanism discovery published for one target.
+func rolloutFor(targets []hardeningTarget, kind, name string) string {
+	for _, t := range targets {
+		if t.Ref.Kind == kind && t.Ref.Name == name {
+			return t.Rollout
+		}
+	}
+	return ""
+}
+
+// BR-09: the rollout mechanism is reported so that an operator can see what
+// accepting the restart costs, and it is the field they read at the moment
+// they accept it. It therefore has to describe *this* workload. A Deployment
+// with strategy Recreate takes every pod down at once; telling its operator
+// that "every old pod keeps serving" is the inverse of what will happen, and
+// Recreate is the default for anything with a ReadWriteOnce volume.
+func TestRolloutDescribesTheTargetNotTheDefaults(t *testing.T) {
+	maxUnavailable := intstr.FromInt32(0)
+	maxSurge := intstr.FromString("50%")
+	dsUnavailable := intstr.FromInt32(3)
+
+	r := newHardener(ns("tenant-a"),
+		deployment("tenant-a", "recreate", func(d *appsv1.Deployment) {
+			d.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+		}),
+		deployment("tenant-a", "tuned", func(d *appsv1.Deployment) {
+			d.Spec.Strategy = appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxUnavailable: &maxUnavailable, MaxSurge: &maxSurge,
+				},
+			}
+		}),
+		deployment("tenant-a", "default-strategy"),
+		daemonSet("tenant-a", "ds-tuned", func(d *appsv1.DaemonSet) {
+			d.Spec.UpdateStrategy = appsv1.DaemonSetUpdateStrategy{
+				Type:          appsv1.RollingUpdateDaemonSetStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDaemonSet{MaxUnavailable: &dsUnavailable},
+			}
+		}),
+	)
+
+	targets, _, err := r.discover(context.Background(), "tenant-a")
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+
+	recreate := rolloutFor(targets, "Deployment", "recreate")
+	if !strings.Contains(recreate, "Recreate") {
+		t.Errorf("recreate rollout = %q, want it to name Recreate", recreate)
+	}
+	if strings.Contains(recreate, "keeps serving") || strings.Contains(recreate, "maxSurge") {
+		t.Errorf("recreate rollout = %q, want no surge claim: every pod goes down at once", recreate)
+	}
+
+	tuned := rolloutFor(targets, "Deployment", "tuned")
+	if !strings.Contains(tuned, "50%") || !strings.Contains(tuned, "maxUnavailable 0") {
+		t.Errorf("tuned rollout = %q, want the configured maxSurge 50%% and maxUnavailable 0", tuned)
+	}
+
+	if got := rolloutFor(targets, "Deployment", "default-strategy"); !strings.Contains(got, "25%") {
+		t.Errorf("default rollout = %q, want the documented defaults where nothing is configured", got)
+	}
+
+	if got := rolloutFor(targets, "DaemonSet", "ds-tuned"); !strings.Contains(got, "maxUnavailable 3") {
+		t.Errorf("ds-tuned rollout = %q, want the configured maxUnavailable 3", got)
 	}
 }

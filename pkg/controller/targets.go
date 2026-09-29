@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
@@ -50,11 +51,58 @@ type HardeningReconciler struct {
 // restarts are inherent to what was asked for, and the workload's own
 // maxUnavailable and readiness gating are the mechanism that bounds them
 // (D-10).
+// BR-02's table is captioned "defaults; an operator can override", so the
+// defaults are what these describe when the workload configures nothing. Where
+// it does configure something the reported mechanism is read off the object:
+// the whole point of the field is that the operator accepting the restart can
+// see what it costs for *this* workload, and a Deployment set to Recreate
+// takes every pod down at once — the inverse of the surge text below.
 const (
 	rolloutDeployment  = "RollingUpdate: maxSurge 25% rounds up, maxUnavailable 25% rounds down; new pods are created first, and at 3 replicas or fewer every old pod keeps serving"
+	rolloutRecreate    = "Recreate: every pod is terminated before any replacement is created, so the whole workload is down until the new pods are Ready"
 	rolloutStatefulSet = "RollingUpdate: reverse ordinal, one pod at a time, terminate-then-create, no surge; at 1 replica the workload is down until reverted"
 	rolloutDaemonSet   = "RollingUpdate: maxUnavailable 1, maxSurge 0, delete-then-create per node; the rollout halts after one node"
 )
+
+// deploymentRollout describes how this Deployment in particular rolls out.
+func deploymentRollout(d *appsv1.Deployment) string {
+	if d.Spec.Strategy.Type == appsv1.RecreateDeploymentStrategyType {
+		return rolloutRecreate
+	}
+	ru := d.Spec.Strategy.RollingUpdate
+	if ru == nil || (ru.MaxSurge == nil && ru.MaxUnavailable == nil) {
+		return rolloutDeployment
+	}
+	return fmt.Sprintf(
+		"RollingUpdate: maxSurge %s, maxUnavailable %s, as configured on this workload; new pods are created first",
+		orDefault(ru.MaxSurge, "25%"), orDefault(ru.MaxUnavailable, "25%"))
+}
+
+// daemonSetRollout does the same for a DaemonSet. maxSurge is reported because
+// a non-zero one changes the mechanism from delete-then-create to a surge.
+func daemonSetRollout(d *appsv1.DaemonSet) string {
+	ru := d.Spec.UpdateStrategy.RollingUpdate
+	if ru == nil || (ru.MaxSurge == nil && ru.MaxUnavailable == nil) {
+		return rolloutDaemonSet
+	}
+	return fmt.Sprintf(
+		"RollingUpdate: maxUnavailable %s, maxSurge %s, as configured on this workload; per node",
+		orDefault(ru.MaxUnavailable, "1"), orDefault(ru.MaxSurge, "0"))
+}
+
+// statefulSetRollout does the same for a StatefulSet. It has no surge and no
+// maxUnavailable worth reporting here: a partition above 0 is refused by
+// BR-04, and maxUnavailable only widens the one-at-a-time default.
+func statefulSetRollout(*appsv1.StatefulSet) string { return rolloutStatefulSet }
+
+// orDefault renders an optional IntOrString, naming the documented default
+// where the workload leaves it unset.
+func orDefault(v *intstr.IntOrString, fallback string) string {
+	if v == nil {
+		return fallback
+	}
+	return v.String()
+}
 
 // Refusal reasons. Each is distinct, because "refused" without the cause tells
 // an operator nothing about which knob to turn (AC-07).
@@ -112,7 +160,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 			Ref:     plan.Target{Namespace: namespace, Kind: "Deployment", Name: name},
 			Pod:     &d.Spec.Template.Spec,
 			Pods:    int(d.Status.Replicas),
-			Rollout: rolloutDeployment,
+			Rollout: deploymentRollout(d),
 			patch: func(ctx context.Context, body []byte, opts metav1.PatchOptions) error {
 				_, err := apps.Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, body, opts)
 				return err
@@ -145,7 +193,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 			Ref:     plan.Target{Namespace: namespace, Kind: "StatefulSet", Name: name},
 			Pod:     &s.Spec.Template.Spec,
 			Pods:    int(s.Status.Replicas),
-			Rollout: rolloutStatefulSet,
+			Rollout: statefulSetRollout(s),
 			patch: func(ctx context.Context, body []byte, opts metav1.PatchOptions) error {
 				_, err := apps.StatefulSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, body, opts)
 				return err
@@ -172,7 +220,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 			Ref:     plan.Target{Namespace: namespace, Kind: "DaemonSet", Name: name},
 			Pod:     &d.Spec.Template.Spec,
 			Pods:    int(d.Status.DesiredNumberScheduled),
-			Rollout: rolloutDaemonSet,
+			Rollout: daemonSetRollout(d),
 			patch: func(ctx context.Context, body []byte, opts metav1.PatchOptions) error {
 				_, err := apps.DaemonSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, body, opts)
 				return err

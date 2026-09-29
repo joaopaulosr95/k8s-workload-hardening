@@ -166,6 +166,15 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 	}); err != nil {
 		return err
 	}
+	// Only an apply requeues. FR-03: a refusal during a preview leaves the
+	// object Previewed with the refusal on its row, and the periodic resync
+	// retries it — returning an error here would spin the queue's backoff
+	// against a webhook that may refuse permanently, on behalf of an object
+	// nobody armed. During an apply the same refusal is a Failed target and
+	// does return an error, per FR-04.
+	if !w.Armed() {
+		return nil
+	}
 	return retryable(rows)
 }
 
@@ -286,6 +295,7 @@ func (r *HardeningReconciler) setHardeningStatus(ctx context.Context, w *v1alpha
 // Unapproved is not a failure at all: approving a subset is the expected use
 // of a per-target gate (FR-04, FR-06). Returning an error for either would
 // spin the queue's backoff forever over a state only a human can clear.
+// It is reached only on an armed pass; see the caller.
 func retryable(rows []v1alpha1.TargetStatus) error {
 	var failed int
 	for _, row := range rows {
