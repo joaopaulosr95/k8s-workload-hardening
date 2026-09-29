@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Expose six Prometheus series from the controller and give an operator a one-command Prometheus and Grafana to look at them.
+**Goal:** Expose five Prometheus series from the controller, and assert them directly from CI rather than through a dashboard.
 
 **Architecture:** One `pkg/metrics` package owning a **private registry** and the six collectors, imported by every reconciler and served by an `http.Server` in `main` that shuts down with the controller. A private registry rather than the default one, because a vendored library that also registers the Go collector would panic the process at init. Scraping is by pod annotation — no operator, no CRDs, no `ServiceMonitor`.
 
-**Tech Stack:** Go 1.27.1 · `github.com/prometheus/client_golang` · Helm (`prometheus-community/prometheus`, `grafana/grafana`) · kind v0.32.0. Vendored.
+**Tech Stack:** Go 1.27.1 · `github.com/prometheus/client_golang` · kind v0.32.0. Vendored.
 
-**Spec:** `specs/003-bonus/spec.md`, the **Metrics endpoint** and **Grafana** sections. Closes 001's G-07 and 002's G-07.
+**Spec:** `specs/003-bonus/spec.md`, the **Metrics endpoint** section. Closes 001's G-07 and 002's G-07.
 
 **Depends on:** the integration-tests plan's Task 1 for the workflow Task 4 adds a step to, and the refactor plan's Task 4 for the `deploy` recipe.
 
@@ -29,11 +29,11 @@
 
 ## Review Focus
 
-Three conditions, ordered by how likely each is to bite.
+Two conditions, ordered by how likely each is to bite.
+
 
 1. **An unbounded label value.** A counter labelled by object name grows its series count with the cluster and never shrinks, which is how a metrics endpoint becomes the leak it was added to detect. Expected: `Reconcile` takes a `Phase`, not a string, so a caller cannot widen the label set by passing a message. → **Task 1, Step 2.**
 2. **A metrics server that ignores `SIGTERM`.** A bare `go http.ListenAndServe` does not see the signal context, so every rollout waits out the kubelet's grace period. Expected: the process exits within a few seconds of `SIGTERM`. → **Task 3, Step 4.**
-3. **A Prometheus that scrapes nothing.** Without the operator's CRDs there is no `ServiceMonitor`, so a missing annotation produces an empty panel that reads exactly like a quiet controller. Expected: the install script fails within 60s if no controller target is being scraped, where the cause is still visible. → **Task 5, Step 1.**
 
 A fourth, checked and handled rather than listed: a metric registered twice panics at `init`, which is a start-up crash rather than a test failure. `TestHandlerIsReusable` at **Task 1, Step 2** covers it, and the private registry is what makes it unlikely in the first place.
 
@@ -48,9 +48,8 @@ A fourth, checked and handled rather than listed: a metric registered twice pani
 | `cmd/main/main.go` | **Modified.** A `-metrics-addr` flag and an `http.Server` that shuts down with the controller. |
 | `deploy/controller.yaml` | **Modified.** A `metrics` container port and the three `prometheus.io/*` annotations the chart's default config honours. |
 | `deploy/metrics-service.yaml` | **New.** A Service for the metrics port, and nothing else. |
-| `hack/grafana.sh` | **New.** The raw charts, with the exporters and alertmanager off, and the queries in the script rather than in a checked-in dashboard. |
 | `.github/workflows/ci.yml` | **Modified.** One step asserting four series by name after `make verify` has exercised them. |
-| `Makefile` | **Modified.** `deploy` applies the Service; `grafana` runs the script. |
+| `Makefile` | **Modified.** `deploy` applies the Service. |
 
 ---
 
@@ -183,7 +182,7 @@ Create `pkg/metrics/metrics.go`:
 // register, and a duplicate registration panics. Six series and the two
 // standard collectors, named explicitly, is the whole surface.
 //
-// NFR-01 forbids new dependencies and is waived here. Six counters in the text
+// NFR-01 forbids new dependencies and is waived here. Five series in the text
 // format really are forty lines of net/http and sync/atomic — and a hand-rolled
 // exposition is forty lines every reviewer has to check for escaping and
 // "# TYPE" ordering before trusting, against a library every scraper already
@@ -232,7 +231,7 @@ var (
 	})
 
 	// A gauge, not a counter: depth goes down as well as up. The spec calls
-	// all six counters; five of them are.
+	// all of these counters; four of them are.
 	queueDepth = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "hardening_queue_depth",
 		Help: "Items currently in the work queue.",
@@ -475,7 +474,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `metrics.Handler()` from Task 1.
-- Produces: a `-metrics-addr` flag, default `:8080`. Task 4's manifest and Task 5's scrape config both name that port.
+- Produces: a `-metrics-addr` flag, default `:8080`. Task 4's manifest and Service both name that port.
 
 - [ ] **Step 1: Add the flag**
 
@@ -567,7 +566,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: the `:8080` default from Task 3.
-- Produces: a `Service/network-isolation-metrics` in `isolation-system` on port 8080, and pod annotations Task 5's Prometheus scrapes.
+- Produces: a `Service/network-isolation-metrics` in `isolation-system` on port 8080, and the pod annotations any scraper needs.
 
 - [ ] **Step 1: Add the port and the scrape annotations**
 
@@ -579,7 +578,7 @@ In `deploy/controller.yaml`, add to the pod template's `metadata`:
       annotations:
         # Scraped by annotation rather than by ServiceMonitor: the raw
         # prometheus chart ships no operator and no CRDs, and its default
-        # kubernetes_sd config honours these three (see hack/grafana.sh).
+        # kubernetes_sd config honours these three.
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
         prometheus.io/path: /metrics
@@ -626,7 +625,7 @@ In the `Makefile`'s `deploy` recipe, after the `kubectl apply -f deploy/controll
 	kubectl apply -f deploy/metrics-service.yaml
 ```
 
-- [ ] **Step 4: Add the CI smoke test (Review Focus 4)**
+- [ ] **Step 4: Add the CI smoke test**
 
 In `.github/workflows/ci.yml`, in the `kind` job, after the step that runs `make verify`:
 
@@ -660,10 +659,29 @@ echo "service selector=$svc  pod labels=$pod"
 
 Expected: both manifests validate, and the two label expressions agree on `app:network-isolation`. A Service whose selector matches nothing returns a connection refused that reads exactly like a dead controller.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Document the endpoint in the README**
+
+Under `## Tests` (or a new `## Metrics` section if the documentation plan's
+README router has landed), add:
+
+```markdown
+### Metrics
+
+The controller serves five series on `:8080/metrics` — reconciles by resource
+and phase, targets patched, dry-run refusals, apply failures, and queue depth.
+Queue depth is a gauge; the rest are counters.
+
+There is no dashboard and no Prometheus in this repository. CI scrapes the
+endpoint through its Service and asserts the series by name, which is what the
+endpoint is for; pointing a Prometheus at it is the operator's choice of
+tooling, and the pod already carries the `prometheus.io/*` annotations a
+default `kubernetes_sd` config honours.
+```
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add deploy/controller.yaml deploy/metrics-service.yaml Makefile .github/workflows/ci.yml
+git add deploy/controller.yaml deploy/metrics-service.yaml Makefile .github/workflows/ci.yml README.md
 git commit -m "feat(metrics): expose the port, add a Service, and smoke it in CI
 
 Scrape annotations rather than a ServiceMonitor: the raw prometheus chart
@@ -679,185 +697,19 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 5: Prometheus and Grafana from one script (Grafana)
-
-**Files:**
-- Create: `hack/grafana.sh`
-- Modify: `Makefile`
-- Modify: `README.md`
-
-**Interfaces:**
-- Consumes: the pod annotations from Task 4.
-- Produces: `make grafana`, and nothing other tasks read.
-
-Not `kube-prometheus-stack`: it installs an operator, its CRDs, node-exporter, kube-state-metrics and a default alert set in order to scrape six series — more moving parts than the thing being observed. The two charts alone are a Prometheus and a Grafana.
-
-- [ ] **Step 1: Write the script**
-
-Create `hack/grafana.sh`:
-
-```bash
-#!/usr/bin/env bash
-# Installs a Prometheus and a Grafana into the kind cluster and points Grafana
-# at Prometheus, so the six series in pkg/metrics can be looked at.
-#
-# The raw charts, not kube-prometheus-stack: see specs/003-bonus/spec.md. No
-# operator, no CRDs, no ServiceMonitor — the controller's pod carries
-# prometheus.io/scrape annotations and the chart's default kubernetes_sd
-# config picks them up.
-#
-# No dashboards are checked in. One that drifts from the metric names is worse
-# than none, and the queries below are in this script where they are read.
-set -euo pipefail
-
-ns=monitoring
-
-need() { command -v "$1" >/dev/null || { echo "missing: $1"; exit 1; }; }
-need helm
-need kubectl
-
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null
-helm repo add grafana https://grafana.github.io/helm-charts >/dev/null
-helm repo update >/dev/null
-
-kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-
-# Server only. alertmanager, pushgateway and the exporters have nothing to do
-# with six counters on one pod.
-helm upgrade --install prometheus prometheus-community/prometheus \
-  --namespace "$ns" --wait --timeout 5m \
-  --set alertmanager.enabled=false \
-  --set prometheus-pushgateway.enabled=false \
-  --set prometheus-node-exporter.enabled=false \
-  --set kube-state-metrics.enabled=false \
-  --set server.persistentVolume.enabled=false \
-  --set server.global.scrape_interval=15s >/dev/null
-
-helm upgrade --install grafana grafana/grafana \
-  --namespace "$ns" --wait --timeout 5m \
-  --set persistence.enabled=false \
-  --set adminPassword=admin \
-  --set 'datasources.datasources\.yaml.apiVersion=1' \
-  --set 'datasources.datasources\.yaml.datasources[0].name=Prometheus' \
-  --set 'datasources.datasources\.yaml.datasources[0].type=prometheus' \
-  --set 'datasources.datasources\.yaml.datasources[0].url=http://prometheus-server.monitoring.svc' \
-  --set 'datasources.datasources\.yaml.datasources[0].access=proxy' \
-  --set 'datasources.datasources\.yaml.datasources[0].isDefault=true' >/dev/null
-
-# Review Focus 5: a Prometheus that scrapes nothing and a quiet controller are
-# the same empty panel. Fail here instead, where the cause is visible.
-echo "== waiting for the controller target to be scraped =="
-for i in $(seq 1 30); do
-  up=$(kubectl -n "$ns" exec deploy/prometheus-server -c prometheus-server -- \
-    wget -qO- 'http://localhost:9090/api/v1/query?query=up{app="network-isolation"}' 2>/dev/null || true)
-  if printf '%s' "$up" | grep -q '"value"'; then
-    echo "ok    prometheus is scraping the controller"
-    break
-  fi
-  [ "$i" -eq 30 ] && { echo "FAIL  prometheus scraped no controller target after 60s"; exit 1; }
-  sleep 2
-done
-
-cat <<'EOF'
-
-== ready ==
-  kubectl -n monitoring port-forward svc/grafana 3000:80
-  open http://localhost:3000    (admin / admin)
-
-Queries worth a panel:
-  sum by (phase) (hardening_reconcile_total)
-  rate(hardening_targets_patched_total[5m])
-  hardening_queue_depth
-  rate(hardening_dryrun_refusals_total[5m])
-  rate(hardening_apply_failures_total[5m])
-EOF
-```
-
-```bash
-chmod +x hack/grafana.sh
-```
-
-- [ ] **Step 2: Add the make target**
-
-Add to `.PHONY` and to the `Makefile`:
-
-```make
-# Not part of verify: it installs two Helm charts and is for looking at the
-# numbers by hand, not for asserting anything in CI.
-grafana:
-	./hack/grafana.sh
-```
-
-- [ ] **Step 3: Run it against a live kind cluster**
-
-```bash
-make kind-up || true
-make deploy
-make grafana
-```
-
-Expected: `ok    prometheus is scraping the controller`, then the ready banner. If the scrape check times out, `kubectl -n monitoring exec deploy/prometheus-server -c prometheus-server -- wget -qO- localhost:9090/api/v1/targets` shows why — most likely the annotations in Task 4 Step 1 did not land on the **pod template**, only on the Deployment.
-
-- [ ] **Step 4: Confirm a query returns data**
-
-```bash
-kubectl -n monitoring exec deploy/prometheus-server -c prometheus-server -- \
-  wget -qO- 'http://localhost:9090/api/v1/query?query=hardening_reconcile_total' | head -c 400
-```
-
-Expected: a JSON body with `"status":"success"` and at least one entry in `result`.
-
-- [ ] **Step 5: Document it in the README**
-
-Under `## Tests` (or a new `## Metrics` section if the documentation plan's README router has landed), add:
-
-```markdown
-### Metrics
-
-The controller serves six series on `:8080/metrics` — reconciles by resource
-and phase, targets patched, dry-run refusals, apply failures
-and queue depth.
-
-`make grafana` installs a Prometheus and a Grafana into the kind cluster and
-wires them together. It is not part of `make verify`: it is for looking at the
-numbers, not for asserting them. CI asserts the endpoint instead.
-```
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add hack/grafana.sh Makefile README.md
-git commit -m "feat(metrics): make grafana, from the raw charts
-
-Not kube-prometheus-stack: an operator, its CRDs, node-exporter,
-kube-state-metrics and a default alert set, to scrape six series on one pod.
-The two charts alone are a Prometheus and a Grafana, with the exporters and
-alertmanager turned off.
-
-No dashboards checked in — one that drifts from the metric names is worse than
-none, so the queries are in the script, where they are read. The script fails
-if Prometheus has not scraped the controller within 60s, because a scrape that
-silently matched nothing and a quiet controller are the same empty panel.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
-```
-
----
-
 ## Review Focus coverage
 
 | # | Condition | Task, Step |
 | --- | --- | --- |
 | 1 | An unbounded metric label | 1 Step 2 |
 | 2 | A metrics server that ignores `SIGTERM` | 3 Step 4 |
-| 3 | A Prometheus that scrapes nothing | 5 Step 1 |
 | — | A metric registered twice | 1 Step 2 (`TestHandlerIsReusable`) |
 
 ## Deviations and clarifications to confirm before merging
 
-1. **Four counters and one gauge, not six counters.** The spec says "about six counters worth having… reconciles by phase, targets patched, dry-run refusals, apply failures, queue depth". Queue depth goes down as well as up, so it is a gauge; a counter that decreases breaks `rate()` and every dashboard built on it. The other four are counters as described. Task 1.
+1. **Four counters and one gauge.** Queue depth goes down as well as up, so it is a gauge; a counter that decreases breaks `rate()` and every consumer built on it. The other four are counters. Task 1.
 
-2. **The spec's own argument for the hand-rolled version is recorded and overruled.** Six counters in the text exposition format really are `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly forty lines with no `go.mod` change. The user's decision, recorded in the spec, is the library — and the plan states the reason on its own terms rather than deferring: a hand-rolled exposition is forty lines every reviewer must check for escaping and `# TYPE` ordering before trusting. The cost is named in Task 1's commit: `go.mod` and `go.sum` gain prometheus and its transitive set, for six series. `vendor/` grows too, but locally only — it is gitignored, so the diff a reviewer sees is the module lines.
+2. **The spec's own argument for the hand-rolled version is recorded and overruled.** Five series in the text exposition format really are `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly forty lines with no `go.mod` change. The user's decision, recorded in the spec, is the library — and the plan states the reason on its own terms rather than deferring: a hand-rolled exposition is forty lines every reviewer must check for escaping and `# TYPE` ordering before trusting. The cost is named in Task 1's commit: `go.mod` and `go.sum` gain prometheus and its transitive set, for six series. `vendor/` grows too, but locally only — it is gitignored, so the diff a reviewer sees is the module lines.
 
 3. **DECLINED — a readiness probe on the new port.** The port makes one nearly free and `make deploy`'s `rollout status` would start meaning something. It is still a behaviour change to the Deployment that the spec did not ask for, in a plan about metrics. Worth doing; worth doing deliberately, somewhere else.
 

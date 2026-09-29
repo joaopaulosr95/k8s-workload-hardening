@@ -238,6 +238,24 @@ patch passed every unit test and then failed in-cluster with a `Forbidden`,
 because the ClusterRole granted `update` but not `patch`. Only `make deploy`
 followed by `make verify` catches that class.
 
+## Metrics
+
+The controller serves five series on `:8080/metrics` — reconciles by resource
+and phase, targets patched, dry-run refusals, apply failures, and queue depth.
+Queue depth is a gauge; the rest are counters. `-metrics-addr` moves the
+listener, and an empty value disables it.
+
+Labels are closed sets: `resource` and `phase`, never a namespace or an object
+name. An unbounded label value would grow the series count with the cluster and
+never shrink, which is how a metrics endpoint becomes the leak it was added to
+find.
+
+There is no dashboard and no Prometheus in this repository. CI scrapes the
+endpoint through its Service and asserts the series by name, which is what the
+endpoint is for; pointing a Prometheus at it is a choice of tooling, and the
+pod already carries the `prometheus.io/*` annotations a default
+`kubernetes_sd` config honours.
+
 ## Core task 2 — on-demand workload hardening
 
 Creating a `WorkloadHardening` object **previews** what would change across the

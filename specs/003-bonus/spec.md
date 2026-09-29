@@ -11,7 +11,7 @@ status: Draft
 # "is this spec describing shipped behaviour?" rather than "has anyone read it".
 #   [x] Refactor            — specs/003-bonus/refactor/tasks.md, merged
 #   [x] Integration tests   — specs/003-bonus/integration-tests/tasks.md, merged
-#   [ ] Metrics endpoint    — specs/003-bonus/metrics/tasks.md
+#   [x] Metrics endpoint    — specs/003-bonus/metrics/tasks.md, merged
 #   [ ] Documentation       — specs/003-bonus/docs/tasks.md
 relatedResources:
   - specs/001-network-isolation/spec.md
@@ -77,41 +77,28 @@ for table consolidation and no more.
 
 ## Metrics endpoint
 
-About six counters are worth having from a controller that runs once per request — reconciles by
-phase, targets patched, targets reverted, dry-run refusals, apply failures, queue depth — and
-publishing them closes 001's G-07 and 002's G-07.
+About five series are worth having from a controller that runs once per request — reconciles by
+resource and phase, targets patched, dry-run refusals, apply failures, queue depth — and
+publishing them closes 001's G-07 and 002's G-07. Queue depth is a gauge; the rest are counters.
 
 **NFR-01 is waived here, deliberately, and the endpoint is built on `prometheus/client_golang`.**
-The argument NFR-01 encodes is real and this is the case where it loses: six counters in the text
+The argument NFR-01 encodes is real and this is the case where it loses: five series in the text
 exposition format are `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly forty lines
 with no `go.mod` change, but a hand-rolled exposition is forty lines every reviewer has to read
 before trusting, and escaping and `# TYPE` ordering are exactly the details a hand-rolled one gets
 subtly wrong. The library is what every scraper and dashboard already assumes.
 
-The cost is named rather than waved through: `go.sum` carries no prometheus today and the repo
-vendors, so this is `go get` plus `go mod vendor`, and the dependency brings a transitive set of
-its own — a visibly larger `vendor/` for six counters. That is the trade being accepted.
+The cost is named rather than waved through, and it is smaller than it first looked: the
+integration-tests item already pulled `prometheus/client_golang` in as an indirect dependency of
+`controller-runtime`, so this promotes an existing dependency to a direct one rather than adding
+a transitive set. What the commit carries is a few lines of `go.mod` and `go.sum`.
+
+How it is looked at is left open. The endpoint is asserted directly — CI scrapes it and checks
+the series by name — and anything further (a Prometheus, a Grafana, a dashboard) is the
+operator's choice of tooling rather than something this project ships or specifies.
 
 The controller Deployment gains a metrics container port and a Service in front of it. Neither
 needs a new RBAC rule: serving metrics reads nothing from the API.
-
-### Grafana
-
-**The raw `prometheus` and `grafana` charts, not `kube-prometheus-stack`.** The stack installs an
-operator, its CRDs, node-exporter, kube-state-metrics and a default alert set in order to scrape
-six counters — more moving parts than the thing being observed, and slower to stand up than the
-cluster the rest of the verification runs on. The two charts on their own are a Prometheus and a
-Grafana, which is the whole requirement.
-
-The consequence to plan for is scraping. Without the prometheus-operator's CRDs there is no
-`ServiceMonitor`, so the controller is scraped through Prometheus' own `scrape_configs`: either a
-`kubernetes_sd_configs` job selecting the pod by namespace and label, or the `prometheus.io/scrape`
-annotations the chart's default config already honours. The annotations are the smaller of the
-two and are the version to write.
-
-Both charts are installed from a `hack/` script alongside the verification scripts, not from
-checked-in dashboards. A dashboard JSON that drifts from the counters is worse than no dashboard,
-and the script is what makes the result reproducible by someone who did not write it.
 
 ## Integration/e2e tests on kind
 
