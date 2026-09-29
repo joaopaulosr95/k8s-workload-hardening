@@ -10,7 +10,7 @@
 
 **Spec:** `specs/003-bonus/spec.md`, the **Documentation** section, and the **Docs** paragraph of the Refactor section, whose README merge lands here rather than there.
 
-**Depends on:** every other plan, because it documents them. Run it last. The reference's Metrics section is written only if the metrics plan has landed; the tutorial's undo steps only if the undo plan has.
+**Depends on:** every other plan, because it documents them. Run it last. The reference's Metrics section is written only if the metrics plan has landed.
 
 ---
 
@@ -45,8 +45,8 @@ A fourth, handled rather than listed: a documented `make` target that no longer 
 | File | Mode | Responsibility |
 | --- | --- | --- |
 | `docs/reference.md` | Reference | The annotations and who may remove each, the phase and outcome vocabulary, the flags, the metric names, the RBAC and what it deliberately never asks for. Not the CRD fields — `kubectl explain` serves those. |
-| `docs/how-to.md` | How-to | Six goals an operator actually has, each one sentence of when, the commands in full, and one sentence of when not. Sections, not files. |
-| `docs/tutorial.md` | Tutorial | One path: cluster, isolation, hardening, approval, undo, release, teardown. No choices in it. |
+| `docs/how-to.md` | How-to | Four goals an operator actually has, each one sentence of when, the commands in full, and one sentence of when not. Sections, not files. |
+| `docs/tutorial.md` | Tutorial | One path: cluster, isolation, hardening, approval, rollout, teardown. No choices in it. |
 | `specs/` | Explanation | Already written. Linked, never restated. |
 | `README.md` | — | **Rewritten** as a router: what this is, four links, requirements. |
 | `.github/workflows/ci.yml` | — | **Modified.** Two drift checks in the `unit` job: documented identifiers exist, documented `make` targets exist. |
@@ -115,7 +115,7 @@ prints the schema this repository ships — it is not duplicated here.
 
 ```console
 $ kubectl explain workloadhardening.spec
-$ kubectl explain workloadhardeningundo.spec.workloadSelector
+$ kubectl explain workloadhardening.spec.approvedPlan
 $ kubectl explain networkisolation.spec.peers
 ```
 
@@ -125,17 +125,15 @@ $ kubectl explain networkisolation.spec.peers
 | --- | --- | --- | --- |
 | `NetworkIsolation` | `networkisolations` | `ni` | Namespaced |
 | `WorkloadHardening` | `workloadhardenings` | `wh` | Namespaced |
-| `WorkloadHardeningUndo` | `workloadhardeningundos` | `whu` | Namespaced |
 
-All three are `hardening.acme.corp/v1alpha1`, all three have a status subresource.
+Both are `hardening.acme.corp/v1alpha1`, and both have a status subresource.
 
 ## Annotations and labels
 
 | Key | Written on | Written by | Removed by |
 | --- | --- | --- | --- |
-| `hardening.acme.corp/filled` | the patched workload | `WorkloadHardening` | `WorkloadHardeningUndo`, when every record it holds is reverted |
-| `hardening.acme.corp/skip` | a workload | a human, or `WorkloadHardeningUndo` | whoever wrote it, and nobody else |
-| `hardening.acme.corp/skip-by` | a workload | `WorkloadHardeningUndo` | the object whose UID it names |
+| `hardening.acme.corp/filled` | the patched workload | `WorkloadHardening` | nothing — it outlives the object that wrote it, deliberately (BR-08) |
+| `hardening.acme.corp/skip` | a workload | a human | whoever wrote it, and nobody else |
 | `hardening.acme.corp/owner` | a generated NetworkPolicy | `NetworkIsolation` | its finalizer |
 | `hardening.acme.corp/operation` (label) | a generated NetworkPolicy | `NetworkIsolation` | its finalizer |
 
@@ -146,7 +144,6 @@ A `skip` with no `skip-by` is a human's exemption. Nothing in this tool ever rem
 | Finalizer | On | Removes |
 | --- | --- | --- |
 | `hardening.acme.corp/cleanup` | `NetworkIsolation` | the NetworkPolicies it generated |
-| `hardening.acme.corp/undo-release` | `WorkloadHardeningUndo` | `skip` and `skip-by` from the workloads it holds |
 
 `WorkloadHardening` carries no finalizer: deleting it leaves the patches and the provenance
 annotation in place.
@@ -160,9 +157,9 @@ annotation in place.
 | `Active` | `NetworkIsolation` | no |
 | `Degraded` | `NetworkIsolation` | no |
 | `Deleting` | `NetworkIsolation` | no |
-| `Previewed` | `WorkloadHardening`, `WorkloadHardeningUndo` | no |
-| `Applied` | `WorkloadHardening`, `WorkloadHardeningUndo` | yes, until `spec.approvedPlan` changes — and for an undo, only for its reverts; its holds are maintained for the object's whole life |
-| `PartiallyApplied` | `WorkloadHardening`, `WorkloadHardeningUndo` | no |
+| `Previewed` | `WorkloadHardening` | no |
+| `Applied` | `WorkloadHardening` | yes, until `spec.approvedPlan` changes |
+| `PartiallyApplied` | `WorkloadHardening` | no |
 
 ## Per-target outcomes
 
@@ -288,14 +285,12 @@ Every section has the same shape and nothing else: one sentence saying when this
 
 - [ ] **Step 1: Write the document**
 
-Create `docs/how-to.md` with exactly these six sections:
+Create `docs/how-to.md` with exactly these four sections:
 
 | Section | Ends with — when this is the wrong move |
 | --- | --- |
 | **Exempt a workload from hardening** — annotate it `hardening.acme.corp/skip: "true"` by hand, with no `skip-by`, which nothing in this tool will ever remove | if the workload only needs *different* values, the policy is per-object; create a second `WorkloadHardening` instead |
 | **Approve part of a plan** — read `status.plan`, copy the hashes of the targets you want into `spec.approvedPlan`, leave the rest | if every target is wanted, approving all of them in one edit is one rollout window rather than several |
-| **Revert a run that broke something** — create a `WorkloadHardeningUndo` over the namespaces, read its plan, approve, apply | if the rollout has merely halted and the template is right, `kubectl rollout undo` is faster and touches nothing else |
-| **Hand a bypass back** — `kubectl delete workloadhardeningundo <name>`, which releases every workload it holds | if only one workload should return to hardening, narrow the undo's selector instead: deleting it releases all of them |
 | **Widen the blast radius deliberately** — `spec.namespaces` is immutable, so this is a new object, not an edit | if the new namespaces need different request values, that is a second object regardless |
 | **Read a `Stale` row** — compare `status.plan[].approvedHash` with `status.plan[].hash`, then re-approve the new one | if several targets are `Stale` at once, something is editing the workloads; find it before re-approving, or the next approval is stale too |
 
@@ -332,7 +327,7 @@ Expected: **no output**. Each section carries one link into `specs/` for the rea
 
 ```bash
 git add docs/how-to.md
-git commit -m "docs(how-to): six goals, each with its commands and its counter-case
+git commit -m "docs(how-to): four goals, each with its commands and its counter-case
 
 The Diátaxis how-to quadrant. Every one of these answers already existed,
 inside business-rule prose in specs/, where an operator halfway through an
@@ -345,7 +340,7 @@ navigate for no gain.
 Each section is one sentence on when this is right, the commands in full, and
 one sentence on when it is wrong — the last of which is the part a
 reasoning-free how-to usually drops, and the part that stops somebody deleting
-an undo when they meant to narrow its selector.
+an object when they meant to narrow what it targets.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -378,10 +373,8 @@ The path, each step a `make` target or a single `kubectl`:
 5. `make samples-hardening` — a Deployment with no requests and a root container
 6. Apply `deploy/samples/hardening.yaml`; watch `Previewed`; **read `status.plan`** — this is the step the whole design exists for, so the tutorial stops and reads it
 7. Copy the hashes into `spec.approvedPlan`; watch `Applied`; see the fields on the template and the `filled` annotation beside them
-8. Apply `deploy/samples/undo.yaml`; watch it hold the workloads **before** anything is approved
-9. Copy its hashes in; watch `Applied`; see the fields gone, `filled` gone, `skip` and `skip-by` in their place
-10. `kubectl delete workloadhardeningundo tenant-rollback` — the workloads are eligible for hardening again
-11. `make kind-down`
+8. `kubectl rollout status` on each patched Deployment — the pods come back Ready, which is the claim the whole tutorial is making
+9. `make kind-down`
 
 Each step: the command, what to expect, and one line on what just happened. Where a step waits, use the `kubectl wait --for=jsonpath` the verification scripts already use rather than telling the reader to watch.
 
@@ -431,10 +424,10 @@ Replace `README.md` entirely. The duplication the Refactor section describes —
 Two Kubernetes controllers in one binary: `NetworkIsolation` writes the pair of NetworkPolicies
 that isolate two groups of pods from each other, and `WorkloadHardening` fills in missing
 resource requests and missing securityContext fields across namespaces, previewing every change
-and taking approval per workload. `WorkloadHardeningUndo` takes the second one back.
+and taking approval per workload.
 
-- **New here?** [Tutorial](docs/tutorial.md) — one path, cluster to reverted workload, ~15 minutes.
-- **Trying to do something?** [How-to](docs/how-to.md) — six goals, commands first.
+- **New here?** [Tutorial](docs/tutorial.md) — one path, cluster to hardened workload, ~15 minutes.
+- **Trying to do something?** [How-to](docs/how-to.md) — four goals, commands first.
 - **Looking something up?** [Reference](docs/reference.md) — annotations, phases, flags, RBAC, metrics.
 - **Want to know why?** [specs/](specs/) — every decision with the alternative named and refused.
 
@@ -517,7 +510,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 3. **The reference's Metrics section is conditional.** If the metrics plan has not landed, delete that section rather than documenting an endpoint that does not answer. The drift check does not cover metric names — they live in `pkg/metrics`, not `pkg/apis/v1alpha1` — so the metrics plan's own CI assertion is what protects them.
 
-4. **Six how-to sections, not more.** Each is a goal somebody has mid-incident. The temptation is to add one per business rule, which would make the document a second reference and reintroduce the mixing this plan exists to end. If a seventh is genuinely needed, it replaces one rather than joining it.
+4. **Four how-to sections, not more.** Each is a goal somebody has mid-incident. The temptation is to add one per business rule, which would make the document a second reference and reintroduce the mixing this plan exists to end. If a seventh is genuinely needed, it replaces one rather than joining it.
 
 5. **The tutorial is verified by a human pasting it, not by a script.** Task 3, Step 2 says so explicitly. A script would paper over a missing `kubectl wait` — the reader would hit a race the CI never sees — and the claim the tutorial makes is precisely that somebody typing these commands gets this result.
 

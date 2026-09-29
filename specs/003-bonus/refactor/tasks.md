@@ -10,7 +10,7 @@
 
 **Spec:** `specs/003-bonus/spec.md`, the **Refactor** section.
 
-**Depended on by:** the undo plan (Task 3's `plan.Request`), the integration-tests plan (Task 4's aggregates), the metrics plan (Task 4's `deploy` recipe), the documentation plan (Task 4's target names). Nothing here depends on them.
+**Depended on by:** the integration-tests plan (Task 4's aggregates), the metrics plan (Task 4's `deploy` recipe), the documentation plan (Task 4's target names). Nothing here depends on them.
 
 ---
 

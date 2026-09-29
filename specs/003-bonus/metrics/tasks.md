@@ -10,7 +10,7 @@
 
 **Spec:** `specs/003-bonus/spec.md`, the **Metrics endpoint** and **Grafana** sections. Closes 001's G-07 and 002's G-07.
 
-**Depends on:** the integration-tests plan's Task 1 for the workflow Task 4 adds a step to, and the refactor plan's Task 4 for the `deploy` recipe. Independent of the undo plan — `hardening_targets_reverted_total` simply stays at zero until it lands.
+**Depends on:** the integration-tests plan's Task 1 for the workflow Task 4 adds a step to, and the refactor plan's Task 4 for the `deploy` recipe.
 
 ---
 
@@ -67,7 +67,6 @@ A fourth, checked and handled rather than listed: a metric registered twice pani
   - `metrics.Handler() http.Handler`
   - `metrics.Reconcile(resource string, phase v1alpha1.Phase)`
   - `metrics.TargetPatched()`
-  - `metrics.TargetReverted()`
   - `metrics.DryRunRefused()`
   - `metrics.ApplyFailed()`
   - `metrics.QueueDepth(n int)`
@@ -120,7 +119,6 @@ func body(t *testing.T) string {
 func TestHandlerExposesEveryCollector(t *testing.T) {
 	Reconcile("workloadhardenings", v1alpha1.PhaseApplied)
 	TargetPatched()
-	TargetReverted()
 	DryRunRefused()
 	ApplyFailed()
 	QueueDepth(7)
@@ -129,7 +127,6 @@ func TestHandlerExposesEveryCollector(t *testing.T) {
 	for _, name := range []string{
 		`hardening_reconcile_total{phase="Applied",resource="workloadhardenings"} 1`,
 		"hardening_targets_patched_total 1",
-		"hardening_targets_reverted_total 1",
 		"hardening_dryrun_refusals_total 1",
 		"hardening_apply_failures_total 1",
 		"hardening_queue_depth 7",
@@ -224,11 +221,6 @@ var (
 		Help: "Workload templates patched by WorkloadHardening.",
 	})
 
-	targetsReverted = factory.NewCounter(prometheus.CounterOpts{
-		Name: "hardening_targets_reverted_total",
-		Help: "Workload templates reverted by WorkloadHardeningUndo.",
-	})
-
 	dryRunRefusals = factory.NewCounter(prometheus.CounterOpts{
 		Name: "hardening_dryrun_refusals_total",
 		Help: "Dry-run patches the API server refused.",
@@ -267,9 +259,6 @@ func Reconcile(resource string, phase v1alpha1.Phase) {
 
 // TargetPatched records one workload template patched.
 func TargetPatched() { targetsPatched.Inc() }
-
-// TargetReverted records one workload template reverted.
-func TargetReverted() { targetsReverted.Inc() }
 
 // DryRunRefused records one dry-run the API server refused.
 func DryRunRefused() { dryRunRefusals.Inc() }
@@ -330,7 +319,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: every function from Task 1.
-- Produces: nothing new. `hardening_targets_reverted_total` stays at zero until the undo plan's apply path calls `metrics.TargetReverted()`; it is registered here so a dashboard built now does not have to change then.
+- Produces: nothing new. Task 1's functions are called from the paths that already exist.
 
 If the refactor plan has not run, `pkg/controller/isolation.go` is still `pkg/controller/reconcile.go` and `setStatus` on the hardening reconciler is still `setHardeningStatus`. Use whichever names are in the tree.
 
@@ -473,9 +462,6 @@ One call site each. TargetPatched lives in the single function that patches,
 so a retry cannot double-count it, and queue depth is published from the
 consumer because the queue de-duplicates and its length only means something
 once.
-
-hardening_targets_reverted_total stays at zero until the undo wires it. It is
-registered now so a dashboard built today does not change then.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -781,7 +767,6 @@ cat <<'EOF'
 Queries worth a panel:
   sum by (phase) (hardening_reconcile_total)
   rate(hardening_targets_patched_total[5m])
-  rate(hardening_targets_reverted_total[5m])
   hardening_queue_depth
   rate(hardening_dryrun_refusals_total[5m])
   rate(hardening_apply_failures_total[5m])
@@ -830,7 +815,7 @@ Under `## Tests` (or a new `## Metrics` section if the documentation plan's READ
 ### Metrics
 
 The controller serves six series on `:8080/metrics` — reconciles by resource
-and phase, targets patched, targets reverted, dry-run refusals, apply failures
+and phase, targets patched, dry-run refusals, apply failures
 and queue depth.
 
 `make grafana` installs a Prometheus and a Grafana into the kind cluster and
@@ -870,7 +855,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ## Deviations and clarifications to confirm before merging
 
-1. **Five counters and one gauge, not six counters.** The spec says "about six counters worth having… reconciles by phase, targets patched, targets reverted, dry-run refusals, apply failures, queue depth". Queue depth goes down as well as up, so it is a gauge; a counter that decreases breaks `rate()` and every dashboard built on it. The other five are counters as described. Task 1.
+1. **Four counters and one gauge, not six counters.** The spec says "about six counters worth having… reconciles by phase, targets patched, dry-run refusals, apply failures, queue depth". Queue depth goes down as well as up, so it is a gauge; a counter that decreases breaks `rate()` and every dashboard built on it. The other four are counters as described. Task 1.
 
 2. **The spec's own argument for the hand-rolled version is recorded and overruled.** Six counters in the text exposition format really are `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly forty lines with no `go.mod` change. The user's decision, recorded in the spec, is the library — and the plan states the reason on its own terms rather than deferring: a hand-rolled exposition is forty lines every reviewer must check for escaping and `# TYPE` ordering before trusting. The cost is named in Task 1's commit: `go.mod` and `go.sum` gain prometheus and its transitive set, for six series. `vendor/` grows too, but locally only — it is gitignored, so the diff a reviewer sees is the module lines.
 
@@ -878,6 +863,5 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 4. **DECLINED — a `policies_written_total` for 001.** 001's G-07 asks for an endpoint, and the isolation reconciler is covered through `hardening_reconcile_total{resource="networkisolations"}`. A separate counter is a seventh series nobody asked for.
 
-5. **`hardening_targets_reverted_total` is registered before anything increments it.** It stays at zero until the undo plan's apply path calls `metrics.TargetReverted()`. Registering it now means a dashboard built today does not change then; the alternative is a panel that appears later and a query that errors until it does.
 
-6. **The metric names are not covered by the documentation plan's drift check.** That check greps `docs/reference.md` against `pkg/apis/v1alpha1`, and these constants live in `pkg/metrics`. Task 4's CI step asserts four of the six by name against the live endpoint, which is the stronger check anyway — it fails if the series is renamed *or* never emitted.
+5. **The metric names are not covered by the documentation plan's drift check.** That check greps `docs/reference.md` against `pkg/apis/v1alpha1`, and these constants live in `pkg/metrics`. Task 4's CI step asserts four of the six by name against the live endpoint, which is the stronger check anyway — it fails if the series is renamed *or* never emitted.
