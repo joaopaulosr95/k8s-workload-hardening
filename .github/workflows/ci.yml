@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A push to a branch with an open PR would otherwise run this twice, and the
+# kind job is the expensive half.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # A fresh clone has no vendor/ — it is gitignored — so every run
+          # resolves modules from go.sum. Caching is worth having here, and
+          # the k8s.io tree is most of what it saves.
+          cache: true
+      - name: go vet
+        run: go vet ./pkg/... ./cmd/...
+      - name: Unit tests
+        run: make test
+      - name: Coverage floor
+        run: make cover
+
+  kind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Create the cluster
+        uses: helm/kind-action@v1
+        with:
+          # Must match CLUSTER in the Makefile: `kind load docker-image`
+          # names the cluster explicitly, and a mismatch loads the image
+          # into a cluster kubectl is not pointing at.
+          cluster_name: hardening
+          config: hack/kind/cluster.yaml
+      - name: CRD schema and CEL rules
+        run: make verify-crd
+      - name: NetworkIsolation and WorkloadHardening, end to end
+        run: make verify
+      - name: Controller logs on failure
+        if: failure()
+        run: kubectl --context=kind-hardening -n isolation-system logs deployment/network-isolation --tail=200 || true
