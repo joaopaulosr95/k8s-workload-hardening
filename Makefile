@@ -63,6 +63,7 @@ deploy: image
 	$(KUBECTL) apply -f deploy/crd-hardening.yaml
 	$(KUBECTL) apply -f deploy/rbac.yaml
 	$(KUBECTL) apply -f deploy/controller.yaml
+	$(KUBECTL) apply -f deploy/metrics-service.yaml
 	$(KUBECTL) -n isolation-system rollout restart deployment/network-isolation
 	$(KUBECTL) -n isolation-system rollout status deployment/network-isolation --timeout=120s
 

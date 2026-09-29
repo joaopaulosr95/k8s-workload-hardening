@@ -14,6 +14,13 @@ spec:
   template:
     metadata:
       labels: {app: network-isolation}
+      annotations:
+        # Scraped by annotation rather than by ServiceMonitor: the raw
+        # prometheus chart ships no operator and no CRDs, and its default
+        # kubernetes_sd config honours these three (see hack/grafana.sh).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: network-isolation
       securityContext:
@@ -27,7 +34,12 @@ spec:
         - name: controller
           image: ghcr.io/joaopaulosr95/k8s-workload-hardening:dev
           imagePullPolicy: IfNotPresent
+          # -metrics-addr defaults to :8080; the port below is that default.
           args: ["-v=2", "-resync=30s"]
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
           env:
             - name: POD_NAMESPACE
               valueFrom:

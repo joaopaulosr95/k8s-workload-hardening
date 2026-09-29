@@ -1,0 +1,15 @@
+# A Service for the metrics port only. The controller serves no other traffic
+# and takes no requests: nothing reaches it except a scraper.
+apiVersion: v1
+kind: Service
+metadata:
+  name: network-isolation-metrics
+  namespace: isolation-system
+  labels: {app: network-isolation}
+spec:
+  selector: {app: network-isolation}
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
