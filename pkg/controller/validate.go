@@ -55,7 +55,7 @@ func (v validation) reasons() string {
 
 // validate checks every precondition in BR-03, BR-04 and BR-05 before anything
 // is written, and returns the matched pod count per peer.
-func (r *Reconciler) validate(ctx context.Context, iso *v1alpha1.NetworkIsolation) (validation, error) {
+func (r *IsolationReconciler) validate(ctx context.Context, iso *v1alpha1.NetworkIsolation) (validation, error) {
 	peers := iso.Spec.Peers
 
 	// The CRD pins this, but an object stored before the constraint tightened,
@@ -123,7 +123,7 @@ func disjoint(a, b map[string]string) bool {
 
 // countPods returns how many pods g currently matches, rejecting if any of them
 // runs on the host network, where NetworkPolicy behaviour is undefined (BR-04).
-func (r *Reconciler) countPods(ctx context.Context, g v1alpha1.Group) (int, error) {
+func (r *IsolationReconciler) countPods(ctx context.Context, g v1alpha1.Group) (int, error) {
 	// The CRD validates the shape of a label key but not its length, and
 	// labels.SelectorFromSet performs no validation at all — an over-long key
 	// would reach the API server as a 400, which is not a precondition failure
@@ -152,7 +152,7 @@ func (r *Reconciler) countPods(ctx context.Context, g v1alpha1.Group) (int, erro
 // or "" if there is none. NetworkPolicy is additive: an allow rule placed
 // beside an existing ingress policy widens access instead of narrowing it
 // (BR-03), so this operation will not write into such a namespace.
-func (r *Reconciler) foreignIngressPolicy(ctx context.Context, namespace, uid string) (string, error) {
+func (r *IsolationReconciler) foreignIngressPolicy(ctx context.Context, namespace, uid string) (string, error) {
 	list, err := r.Kube.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", err

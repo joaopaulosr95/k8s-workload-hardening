@@ -49,11 +49,11 @@ func iso(aNS string, aLabels map[string]string, bNS string, bLabels map[string]s
 	}
 }
 
-// newReconciler builds a Reconciler over a fake typed clientset seeded with
+// newReconciler builds a IsolationReconciler over a fake typed clientset seeded with
 // objects. The dynamic client is filled in by the reconcile tests; validation
 // never touches it.
-func newReconciler(objects ...runtime.Object) *Reconciler {
-	return &Reconciler{
+func newReconciler(objects ...runtime.Object) *IsolationReconciler {
+	return &IsolationReconciler{
 		Kube: fake.NewSimpleClientset(objects...),
 		Protected: map[string]bool{
 			"kube-system": true, "kube-public": true, "kube-node-lease": true,
@@ -270,7 +270,7 @@ func TestDisjoint(t *testing.T) {
 
 // assertNoWrites fails if the fake clientset recorded anything but reads.
 // "Nothing was written" is half of AC-03 and AC-05.
-func assertNoWrites(t *testing.T, r *Reconciler) {
+func assertNoWrites(t *testing.T, r *IsolationReconciler) {
 	t.Helper()
 	for _, a := range r.Kube.(*fake.Clientset).Actions() {
 		switch a.GetVerb() {

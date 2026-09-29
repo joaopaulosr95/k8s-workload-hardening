@@ -98,7 +98,7 @@ func splitQueueKey(key string) (resource, object string, err error) {
 func New(
 	kube kubernetes.Interface,
 	dyn dynamic.Interface,
-	iso *Reconciler,
+	iso *IsolationReconciler,
 	hardening *HardeningReconciler,
 	resync time.Duration,
 ) (*Controller, error) {

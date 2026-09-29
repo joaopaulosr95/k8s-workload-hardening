@@ -24,9 +24,9 @@ import (
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/policy"
 )
 
-// Reconciler carries everything one reconcile pass needs. It holds client
+// IsolationReconciler carries everything one reconcile pass needs. It holds client
 // interfaces rather than concrete clients, so both fakes drive it directly.
-type Reconciler struct {
+type IsolationReconciler struct {
 	Kube      kubernetes.Interface
 	Dyn       dynamic.Interface
 	Protected map[string]bool
@@ -37,7 +37,7 @@ type Reconciler struct {
 // Reconcile drives one NetworkIsolation, named by its "namespace/name" key,
 // towards what its spec asks for. Desired state is re-derived from the spec on
 // every pass, so a crash between writes is repaired by the next one (FR-04).
-func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
+func (r *IsolationReconciler) Reconcile(ctx context.Context, key string) error {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
@@ -69,7 +69,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 }
 
 // activate validates, persists the finalizer, writes both policies and reports.
-func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1alpha1.NetworkIsolation) error {
+func (r *IsolationReconciler) activate(ctx context.Context, logger klog.Logger, iso *v1alpha1.NetworkIsolation) error {
 	v, err := r.validate(ctx, iso)
 	var rej *rejection
 	if errors.As(err, &rej) {
@@ -167,7 +167,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 // else's operation label under the same name is reported, never overwritten
 // (FR-03). When the stored spec already matches, no write is issued at all, so
 // a steady state costs nothing (AC-06).
-func (r *Reconciler) applyPolicy(ctx context.Context, want *networkingv1.NetworkPolicy, uid string) error {
+func (r *IsolationReconciler) applyPolicy(ctx context.Context, want *networkingv1.NetworkPolicy, uid string) error {
 	api := r.Kube.NetworkingV1().NetworkPolicies(want.Namespace)
 	got, err := api.Get(ctx, want.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -194,7 +194,7 @@ func (r *Reconciler) applyPolicy(ctx context.Context, want *networkingv1.Network
 // so reconciling an unchanged object produces no writes at all (AC-06).
 // lastReconcileTime therefore records when the observation last changed, not
 // when the last pass ran.
-func (r *Reconciler) setStatus(ctx context.Context, iso *v1alpha1.NetworkIsolation, want v1alpha1.IsolationStatus) error {
+func (r *IsolationReconciler) setStatus(ctx context.Context, iso *v1alpha1.NetworkIsolation, want v1alpha1.IsolationStatus) error {
 	want.LastReconcileTime = iso.Status.LastReconcileTime
 	if equality.Semantic.DeepEqual(iso.Status, want) {
 		return nil
@@ -226,7 +226,7 @@ func (r *Reconciler) setStatus(ctx context.Context, iso *v1alpha1.NetworkIsolati
 //
 // resourceVersion rides along so the write still fails on a conflict rather
 // than clobbering a concurrent change.
-func (r *Reconciler) patchFinalizers(ctx context.Context, iso *v1alpha1.NetworkIsolation, finalizers []string) error {
+func (r *IsolationReconciler) patchFinalizers(ctx context.Context, iso *v1alpha1.NetworkIsolation, finalizers []string) error {
 	patch, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
 			"resourceVersion": iso.ResourceVersion,
@@ -256,7 +256,7 @@ func refresh(iso *v1alpha1.NetworkIsolation, from *unstructured.Unstructured) er
 // cleanup removes the policies this operation owns, then the finalizer. It must
 // not depend on matching pods, namespaces or preconditions still being valid
 // (FR-03). Cross-namespace owner references do not work, so this is explicit.
-func (r *Reconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alpha1.NetworkIsolation) error {
+func (r *IsolationReconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alpha1.NetworkIsolation) error {
 	if !slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
 		// Nothing was ever written under this operation, so there is nothing
 		// to undo and nothing holding the object back.
@@ -291,7 +291,7 @@ func (r *Reconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alp
 // deletePolicy removes one policy if this operation owns it. An already absent
 // policy is success; a policy under the same name owned by anyone else is left
 // untouched.
-func (r *Reconciler) deletePolicy(ctx context.Context, namespace, name, uid string) error {
+func (r *IsolationReconciler) deletePolicy(ctx context.Context, namespace, name, uid string) error {
 	api := r.Kube.NetworkingV1().NetworkPolicies(namespace)
 	got, err := api.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {

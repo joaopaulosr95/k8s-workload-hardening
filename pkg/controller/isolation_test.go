@@ -44,7 +44,7 @@ func dynClient(t *testing.T, iso *v1alpha1.NetworkIsolation) *dynamicfake.FakeDy
 }
 
 // stored reads the object back out of the fake dynamic client.
-func stored(t *testing.T, r *Reconciler, iso *v1alpha1.NetworkIsolation) *v1alpha1.NetworkIsolation {
+func stored(t *testing.T, r *IsolationReconciler, iso *v1alpha1.NetworkIsolation) *v1alpha1.NetworkIsolation {
 	t.Helper()
 	u, err := r.Dyn.Resource(v1alpha1.Resource).Namespace(iso.Namespace).Get(context.Background(), iso.Name, metav1.GetOptions{})
 	if err != nil {
@@ -61,7 +61,7 @@ func key(iso *v1alpha1.NetworkIsolation) string { return iso.Namespace + "/" + i
 
 // assertNoCustomResourceWrites fails if the dynamic fake recorded anything but
 // reads against the NetworkIsolation.
-func assertNoCustomResourceWrites(t *testing.T, r *Reconciler) {
+func assertNoCustomResourceWrites(t *testing.T, r *IsolationReconciler) {
 	t.Helper()
 	for _, a := range r.Dyn.(*dynamicfake.FakeDynamicClient).Actions() {
 		switch a.GetVerb() {

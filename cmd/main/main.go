@@ -53,7 +53,7 @@ func main() {
 	protected := protectedNamespaces(*extra)
 	logger.Info("Starting", "protectedNamespaces", slices.Sorted(maps.Keys(protected)), "resync", *resync)
 
-	isolation := &controller.Reconciler{
+	isolation := &controller.IsolationReconciler{
 		Kube:      kube,
 		Dyn:       dyn,
 		Protected: protected,

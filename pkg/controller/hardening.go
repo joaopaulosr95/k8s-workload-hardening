@@ -68,7 +68,7 @@ func (r *HardeningReconciler) Reconcile(ctx context.Context, key string) error {
 		stub.SetUID(u.GetUID())
 		stub.SetResourceVersion(u.GetResourceVersion())
 		stub.SetGeneration(u.GetGeneration())
-		// The status that is already stored, so setHardeningStatus can see
+		// The status that is already stored, so setStatus can see
 		// that nothing changed and write nothing. An object stuck here is
 		// resynced forever, and FR-06 says an unchanged resync issues no
 		// writes at all. status is the one part of this object that does
@@ -79,7 +79,7 @@ func (r *HardeningReconciler) Reconcile(ctx context.Context, key string) error {
 		}
 		// Written through the status subresource, which ignores everything
 		// outside status — so the stub's empty spec never reaches etcd.
-		return r.setHardeningStatus(ctx, stub, v1alpha1.HardeningStatus{
+		return r.setStatus(ctx, stub, v1alpha1.HardeningStatus{
 			Phase:   v1alpha1.PhaseRejected,
 			Message: "spec cannot be read: " + err.Error(),
 		})
@@ -113,7 +113,7 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 		logger.Info("Rejected", "reason", rej.reason)
 		// Rejected is not terminal, and nothing was written, so there is
 		// nothing to report per target.
-		return r.setHardeningStatus(ctx, w, v1alpha1.HardeningStatus{
+		return r.setStatus(ctx, w, v1alpha1.HardeningStatus{
 			Phase:   v1alpha1.PhaseRejected,
 			Message: rej.reason,
 		})
@@ -183,7 +183,7 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 	phase, message := phaseFor(w, rows)
 	logger.Info(string(phase), "message", message, "targets", len(rows), "findings", len(findings))
 
-	if err := r.setHardeningStatus(ctx, w, v1alpha1.HardeningStatus{
+	if err := r.setStatus(ctx, w, v1alpha1.HardeningStatus{
 		Phase:    phase,
 		Message:  message,
 		Plan:     rows,
@@ -208,7 +208,7 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 // controller has never seen, so an operator cannot tell a wedged reconcile
 // from a controller that is not running (NFR-04).
 func (r *HardeningReconciler) reportFailure(ctx context.Context, logger klog.Logger, w *v1alpha1.WorkloadHardening, cause error) error {
-	if statusErr := r.setHardeningStatus(ctx, w, v1alpha1.HardeningStatus{
+	if statusErr := r.setStatus(ctx, w, v1alpha1.HardeningStatus{
 		Phase:    v1alpha1.PhasePending,
 		Message:  cause.Error(),
 		Plan:     w.Status.Plan,
@@ -287,11 +287,11 @@ func (r *HardeningReconciler) validate(ctx context.Context, w *v1alpha1.Workload
 	return policies, nil
 }
 
-// setHardeningStatus writes status only when something other than the
+// setStatus writes status only when something other than the
 // timestamp changed, so a resync of an unchanged object issues no writes at
 // all (FR-06), exactly as in 001. lastReconcileTime therefore records when the
 // observation last changed, not when the last pass ran.
-func (r *HardeningReconciler) setHardeningStatus(ctx context.Context, w *v1alpha1.WorkloadHardening, want v1alpha1.HardeningStatus) error {
+func (r *HardeningReconciler) setStatus(ctx context.Context, w *v1alpha1.WorkloadHardening, want v1alpha1.HardeningStatus) error {
 	// Stamped on every write: the status describes the spec that produced it,
 	// and FR-05's terminality gate compares the two. Set before the equality
 	// check so a pass that changes nothing but the generation still persists
