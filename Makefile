@@ -10,10 +10,14 @@ CLUSTER ?= hardening
 test:
 	go test ./pkg/... -race
 
+# AGENTS.md asks for 90% per code unit, not 90% overall — and the two differ:
+# a package can rot to 70 while a 100%-covered sibling holds the total above
+# the line. So the gate reads the per-package figures `go test` prints, not the
+# profile's total, and fails when the run produced no coverage lines at all. A
+# gate that cannot fail is worse than no gate, because it is believed.
 cover:
-	go test ./pkg/... -coverprofile=coverage.out
-	go tool cover -func=coverage.out | tail -1
-	@go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$$3); if ($$3+0 < 90) {printf "coverage %s%% is below the 90%% floor in AGENTS.md\n", $$3; exit 1}}'
+	@go test ./pkg/... -coverprofile=coverage.out | tee /dev/stderr | awk '/coverage: [0-9.]+% of statements/ { seen = 1; for (i = 1; i <= NF; i++) if ($$i == "coverage:") { pct = $$(i + 1); sub(/%/, "", pct); if (pct + 0 < 90) { printf "%s: %s%% is below the 90%% per-package floor in AGENTS.md\n", $$2, pct; bad = 1 } } } /^FAIL/ { failed = 1 } END { if (!seen) { print "make cover: the test run produced no coverage lines"; exit 1 } exit (bad || failed) }'
+	@go tool cover -func=coverage.out | tail -1
 
 image:
 	docker build -t $(IMAGE):$(TAG) .

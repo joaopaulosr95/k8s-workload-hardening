@@ -49,7 +49,7 @@ make samples-isolation      # three namespaces with probe pods
 make verify-isolation       # AC-07: live TCP/UDP traffic, before / after / removed
 make verify-crd-isolation   # AC-09: API-server schema and immutability
 make test                   # unit tests, race detector
-make cover                  # coverage, and the 90% floor AGENTS.md asks for
+make cover                  # coverage, and the 90% per-package floor AGENTS.md asks for
 
 # core task 2
 make samples-hardening      # harden-a and harden-b: five Deployments, one LimitRange

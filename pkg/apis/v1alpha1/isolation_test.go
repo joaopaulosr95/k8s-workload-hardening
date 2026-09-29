@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -128,20 +129,38 @@ func TestIsolationWireFormatIsStable(t *testing.T) {
 			{Namespace: "tenant-a", PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "gateway"}}},
 			{Namespace: "tenant-b", PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "dashboard"}}},
 		}},
-		Status: IsolationStatus{Phase: PhaseActive, Message: "both policies written"},
+		Status: IsolationStatus{
+			Phase:   PhaseActive,
+			Message: "both policies written",
+			// Both omitempty: unset, they never reach the wire, and the key
+			// set below would silently cover less than it claims to.
+			Peers:             []PeerStatus{{Policy: "netiso-abc-0", Matched: 1}},
+			LastReconcileTime: "2026-09-29T09:00:00Z",
+		},
 	}
 
 	u, err := ToUnstructured(iso)
 	if err != nil {
 		t.Fatalf("ToUnstructured: %v", err)
 	}
-	for _, path := range [][]string{
-		{"spec", "peers"},
-		{"status", "phase"},
-		{"status", "message"},
+	// Every key, not a sample: a list of three would miss the tag a rename is
+	// most likely to reach. PeerStatus.policy is the one that matters here —
+	// renaming the Policy *type* in pkg/plan is exactly the substitution that
+	// could have carried into this tag, and a three-path check would not have
+	// seen it.
+	for _, section := range []struct {
+		name string
+		want []string
+	}{
+		{"spec", []string{"matchLabels", "namespace", "peers", "podSelector"}},
+		{"status", []string{"lastReconcileTime", "matched", "message", "peers", "phase", "policy"}},
 	} {
-		if _, found, err := unstructured.NestedFieldNoCopy(u.Object, path...); err != nil || !found {
-			t.Errorf("wire field %v missing after serialisation (err=%v)", path, err)
+		sub, found, err := unstructured.NestedFieldNoCopy(u.Object, section.name)
+		if err != nil || !found {
+			t.Fatalf("%s missing after serialisation (err=%v)", section.name, err)
+		}
+		if got := wireKeys(sub); !slices.Equal(got, section.want) {
+			t.Errorf("%s wire keys = %v, want %v", section.name, got, section.want)
 		}
 	}
 
@@ -152,4 +171,30 @@ func TestIsolationWireFormatIsStable(t *testing.T) {
 	if !reflect.DeepEqual(iso.Spec, back.Spec) || !reflect.DeepEqual(iso.Status, back.Status) {
 		t.Errorf("round trip changed the object:\n got %+v\nwant %+v", back, iso)
 	}
+}
+
+// wireKeys returns every JSON key reachable inside a decoded object, sorted and
+// deduplicated. A renamed struct tag changes this set and nothing else does,
+// which is what makes it a wire-format pin rather than a spot check.
+func wireKeys(v any) []string {
+	var out []string
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			out = append(out, k)
+			// matchLabels' own keys are label names — the operator's data, not
+			// this project's wire format. Descending into them would pin a
+			// fixture's labels as if they were schema.
+			if k == "matchLabels" {
+				continue
+			}
+			out = append(out, wireKeys(val)...)
+		}
+	case []any:
+		for _, item := range t {
+			out = append(out, wireKeys(item)...)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
