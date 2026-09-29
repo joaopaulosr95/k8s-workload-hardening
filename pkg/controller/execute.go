@@ -10,6 +10,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1"
+	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/metrics"
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/plan"
 )
 
@@ -69,6 +70,7 @@ func (r *HardeningReconciler) preview(
 		return row
 	}
 	if err := t.patch(ctx, body, dryRun()); err != nil {
+		metrics.DryRunRefused()
 		// The API server refuses a dry-run that would reach a webhook
 		// declaring side effects other than None or NoneOnDryRun, and that
 		// refusal is reported as this target's outcome rather than silently
@@ -198,6 +200,7 @@ func (r *HardeningReconciler) apply(
 	// acceptance says nothing about whether this write will be accepted now
 	// (FR-03, NFR-02).
 	if err := t.patch(ctx, body, dryRun()); err != nil {
+		metrics.DryRunRefused()
 		logger.Info("Dry-run rejected", "target", t.Ref.String(), "reason", err.Error())
 		row.Outcome = v1alpha1.OutcomeFailed
 		row.Reason = "dry-run rejected: " + err.Error()
@@ -206,6 +209,7 @@ func (r *HardeningReconciler) apply(
 	}
 
 	if err := t.patch(ctx, body, metav1.PatchOptions{}); err != nil {
+		metrics.ApplyFailed()
 		// Keep what succeeded elsewhere and never roll back: a half-hardened
 		// namespace is not improved by un-hardening the half that worked
 		// (FR-04). An API error is never assumed to have landed.
@@ -215,6 +219,9 @@ func (r *HardeningReconciler) apply(
 		return row
 	}
 
+	// The single call site. Counting a patch anywhere else -- a retry path, a
+	// status writer -- would double-count one write.
+	metrics.TargetPatched()
 	row.Outcome = v1alpha1.OutcomePatched
 	logger.Info("Patched", "target", t.Ref.String(), "hash", row.Hash, "fields", row.Fields, "pods", row.Pods)
 	return row

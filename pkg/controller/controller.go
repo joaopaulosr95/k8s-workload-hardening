@@ -20,6 +20,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1"
+	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/metrics"
 )
 
 // Run starts the informers and a single worker. One worker is enough: the queue
@@ -147,6 +148,10 @@ func (c *Controller) processNext(ctx context.Context) bool {
 		return false
 	}
 	defer c.queue.Done(key)
+
+	// Published here rather than on Add: the queue de-duplicates, so its
+	// length only means anything once, from the consumer's side.
+	metrics.QueueDepth(c.queue.Len())
 
 	resource, object, err := splitQueueKey(key)
 	if err != nil {

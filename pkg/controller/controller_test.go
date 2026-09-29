@@ -63,6 +63,11 @@ func (q *fakeQueue) AddRateLimited(k string) { q.requeued = append(q.requeued, k
 func (q *fakeQueue) Forget(k string)         { q.forgotten = append(q.forgotten, k) }
 func (q *fakeQueue) Done(k string)           { q.done = append(q.done, k) }
 
+// Len is not decoration: processNext publishes queue depth from the consumer,
+// and the embedded interface is nil, so without this the promoted method
+// dereferences nil and every processNext test segfaults.
+func (q *fakeQueue) Len() int { return len(q.items) }
+
 // A failed reconcile is retried, never dropped: abandoning a key would leave an
 // isolation request unserved or a cleanup half-finished.
 func TestProcessNextRequeuesOnError(t *testing.T) {

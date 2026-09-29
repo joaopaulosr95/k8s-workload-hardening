@@ -21,6 +21,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1"
+	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/metrics"
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/policy"
 )
 
@@ -82,6 +83,7 @@ func (r *IsolationReconciler) activate(ctx context.Context, logger klog.Logger, 
 			phase = v1alpha1.PhaseDegraded
 		}
 		logger.Info(string(phase), "reason", rej.reason)
+		metrics.Reconcile(v1alpha1.IsolationResource.Resource, phase)
 		if err := r.setStatus(ctx, iso, v1alpha1.IsolationStatus{
 			Phase:   phase,
 			Message: rej.reason,
@@ -103,6 +105,7 @@ func (r *IsolationReconciler) activate(ctx context.Context, logger klog.Logger, 
 		if slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
 			phase = v1alpha1.PhaseDegraded
 		}
+		metrics.Reconcile(v1alpha1.IsolationResource.Resource, phase)
 		if statusErr := r.setStatus(ctx, iso, v1alpha1.IsolationStatus{
 			Phase:   phase,
 			Message: err.Error(),
@@ -119,6 +122,7 @@ func (r *IsolationReconciler) activate(ctx context.Context, logger klog.Logger, 
 	if !slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
 		if v.contaminated() {
 			logger.Info("Rejected", "reason", v.reasons())
+			metrics.Reconcile(v1alpha1.IsolationResource.Resource, v1alpha1.PhaseRejected)
 			return r.setStatus(ctx, iso, v1alpha1.IsolationStatus{Phase: v1alpha1.PhaseRejected, Message: v.reasons()})
 		}
 		// Nothing is written until cleanup is guaranteed a chance to run (FR-03).
@@ -152,6 +156,7 @@ func (r *IsolationReconciler) activate(ctx context.Context, logger klog.Logger, 
 		status.Phase = v1alpha1.PhaseDegraded
 		status.Message = strings.Join(failures, "; ")
 	}
+	metrics.Reconcile(v1alpha1.IsolationResource.Resource, status.Phase)
 	if err := r.setStatus(ctx, iso, status); err != nil {
 		return err
 	}
@@ -263,6 +268,7 @@ func (r *IsolationReconciler) cleanup(ctx context.Context, logger klog.Logger, i
 		return nil
 	}
 
+	metrics.Reconcile(v1alpha1.IsolationResource.Resource, v1alpha1.PhaseDeleting)
 	if err := r.setStatus(ctx, iso, v1alpha1.IsolationStatus{
 		Phase: v1alpha1.PhaseDeleting,
 		Peers: iso.Status.Peers,

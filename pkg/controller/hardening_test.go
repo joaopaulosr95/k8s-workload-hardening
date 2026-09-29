@@ -3,7 +3,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,6 +23,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1"
+	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/metrics"
 )
 
 // hardening builds an unarmed request over the given namespaces.
@@ -1403,5 +1407,61 @@ func TestDryRunCacheDoesNotOutliveItsTargets(t *testing.T) {
 	}
 	if n := len(r.verified); n != 0 {
 		t.Errorf("cache holds %d entries for a request that no longer exists", n)
+	}
+}
+
+// counterValue scrapes the metrics handler and reads one series by its exact
+// exposition prefix. Scraping rather than reaching into the collector, so the
+// test fails the same way a dashboard would.
+func counterValue(t *testing.T, series string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, series+" ") {
+			continue
+		}
+		v, err := strconv.ParseFloat(strings.TrimPrefix(line, series+" "), 64)
+		if err != nil {
+			t.Fatalf("parsing %q: %v", line, err)
+		}
+		return v
+	}
+	return 0
+}
+
+// One armed pass over one target increments the patch counter once and the
+// reconcile counter once, under the phase the object reached. Counting patches
+// anywhere but the one place that patches would double-count a retry.
+func TestMetricsCountPatchesAndPhases(t *testing.T) {
+	before := counterValue(t, "hardening_targets_patched_total")
+
+	w := hardening("tenant-a")
+	r := newHardener(ns("tenant-a"), deployment("tenant-a", "api"))
+	r.Dyn = hardeningDynClient(t, w)
+	dryRunGuard(t, r.Kube.(*fake.Clientset))
+
+	if err := r.Reconcile(context.Background(), hardeningKey(w)); err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if got := counterValue(t, "hardening_targets_patched_total"); got != before {
+		t.Errorf("a preview incremented the patch counter: %v -> %v", before, got)
+	}
+
+	// arm() rather than a hand-rolled copy: it bumps metadata.generation, which
+	// FR-05's terminality gate compares against status.observedGeneration. A
+	// copy that left it alone would reconcile a terminal object and patch
+	// nothing, and this test would fail for a reason it is not about.
+	previewed := storedHardening(t, r, w)
+	armed := arm(t, r, w, previewed.Status.Plan[0].Hash)
+
+	if err := r.Reconcile(context.Background(), hardeningKey(armed)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := counterValue(t, "hardening_targets_patched_total"); got != before+1 {
+		t.Errorf("hardening_targets_patched_total = %v, want %v after one patch", got, before+1)
+	}
+	if counterValue(t, `hardening_reconcile_total{phase="Applied",resource="workloadhardenings"}`) == 0 {
+		t.Error("no reconcile counted under phase Applied")
 	}
 }

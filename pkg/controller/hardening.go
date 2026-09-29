@@ -17,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/apis/v1alpha1"
+	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/metrics"
 	"github.com/joaopaulosr95/k8s-workload-hardening/pkg/plan"
 )
 
@@ -79,6 +80,7 @@ func (r *HardeningReconciler) Reconcile(ctx context.Context, key string) error {
 		}
 		// Written through the status subresource, which ignores everything
 		// outside status — so the stub's empty spec never reaches etcd.
+		metrics.Reconcile(v1alpha1.HardeningResource.Resource, v1alpha1.PhaseRejected)
 		return r.setStatus(ctx, stub, v1alpha1.HardeningStatus{
 			Phase:   v1alpha1.PhaseRejected,
 			Message: "spec cannot be read: " + err.Error(),
@@ -113,6 +115,7 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 		logger.Info("Rejected", "reason", rej.reason)
 		// Rejected is not terminal, and nothing was written, so there is
 		// nothing to report per target.
+		metrics.Reconcile(v1alpha1.HardeningResource.Resource, v1alpha1.PhaseRejected)
 		return r.setStatus(ctx, w, v1alpha1.HardeningStatus{
 			Phase:   v1alpha1.PhaseRejected,
 			Message: rej.reason,
@@ -181,6 +184,7 @@ func (r *HardeningReconciler) evaluate(ctx context.Context, logger klog.Logger, 
 
 	rows = carry(w.Status.Plan, rows)
 	phase, message := phaseFor(w, rows)
+	metrics.Reconcile(v1alpha1.HardeningResource.Resource, phase)
 	logger.Info(string(phase), "message", message, "targets", len(rows), "findings", len(findings))
 
 	if err := r.setStatus(ctx, w, v1alpha1.HardeningStatus{
