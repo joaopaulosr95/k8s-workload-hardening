@@ -10,7 +10,7 @@ status: Draft
 # this one stays Draft while any of its four is unbuilt, so the status answers
 # "is this spec describing shipped behaviour?" rather than "has anyone read it".
 #   [x] Refactor            — specs/003-bonus/refactor/tasks.md, merged
-#   [ ] Integration tests   — specs/003-bonus/integration-tests/tasks.md
+#   [x] Integration tests   — specs/003-bonus/integration-tests/tasks.md, merged
 #   [ ] Metrics endpoint    — specs/003-bonus/metrics/tasks.md
 #   [ ] Documentation       — specs/003-bonus/docs/tasks.md
 relatedResources:
