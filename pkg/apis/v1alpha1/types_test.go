@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -114,5 +115,41 @@ func TestFromUnstructuredRejectsMalformedObject(t *testing.T) {
 	}
 	if iso != nil {
 		t.Errorf("want a nil object alongside the error, got %+v", iso)
+	}
+}
+
+// The Go type names are ours to change; the JSON field names are on disk in
+// every live cluster. This pins the wire format against a rename that reaches
+// a struct tag by accident.
+func TestIsolationWireFormatIsStable(t *testing.T) {
+	iso := &NetworkIsolation{
+		ObjectMeta: metav1.ObjectMeta{Name: "pair", Namespace: "isolation-system"},
+		Spec: Spec{Peers: []Group{
+			{Namespace: "tenant-a", PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "gateway"}}},
+			{Namespace: "tenant-b", PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "dashboard"}}},
+		}},
+		Status: Status{Phase: PhaseActive, Message: "both policies written"},
+	}
+
+	u, err := ToUnstructured(iso)
+	if err != nil {
+		t.Fatalf("ToUnstructured: %v", err)
+	}
+	for _, path := range [][]string{
+		{"spec", "peers"},
+		{"status", "phase"},
+		{"status", "message"},
+	} {
+		if _, found, err := unstructured.NestedFieldNoCopy(u.Object, path...); err != nil || !found {
+			t.Errorf("wire field %v missing after serialisation (err=%v)", path, err)
+		}
+	}
+
+	back, err := FromUnstructured(u)
+	if err != nil {
+		t.Fatalf("FromUnstructured: %v", err)
+	}
+	if !reflect.DeepEqual(iso.Spec, back.Spec) || !reflect.DeepEqual(iso.Status, back.Status) {
+		t.Errorf("round trip changed the object:\n got %+v\nwant %+v", back, iso)
 	}
 }
