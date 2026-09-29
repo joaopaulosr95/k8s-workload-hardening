@@ -1,4 +1,23 @@
-## Undo for workload hardening
+# Bonus
+
+## Refactor
+
+Act as an independent reviewer and take the following topics as a starting
+point. Feel free to recommend other fixes/changes once you're done with those.
+
+- Standardize naming - network isolation was built under the assumption nothing
+  else would exist in this project, so we have types like V1Alpha.Resource and
+  V1Alpha.HardeningResource, Reconciler and HardeningReconciler, or even files
+  like types.go and hardening.go
+- Restructure docs - currently the README was built after core task 001 and
+  then core task 002 was just appended to the end of the document
+- Review architecture - lookup for potential code optimizations, duplicated
+  and/or unclear snippets, cyclomatic complexity, adherence to custom
+  Kubernetes controllers best practices
+
+## Extra features
+
+### Undo for workload hardening
 
 Cheaper than it looks, because of BR-01 in `specs/002-workload-hardening/spec.md`: the tool only
 ever fills a field whose **effective value** is absent, and never overwrites one. The inverse of
@@ -32,11 +51,11 @@ namespaces, not the original object.
   the first, so object 1's record is lost — recorded as G-03 in 002. 001 refuses this per
   namespace (BR-03 there); 002 does not.
 
-## Metrics endpoint + Grafana stack
+### Metrics endpoint + Grafana stack
 
-## Integration tests using Kind
+### Integration tests using Kind
 
-### NetworkIsolation
+#### NetworkIsolation
 
 - Create 2 namespaces tenant-a and tenant-b
 - Deploy two alpine containers
@@ -46,9 +65,9 @@ namespaces, not the original object.
 - Remove NetworkIsolation
 - Check if traffic is back
 
-### Workload hardening
+#### Workload hardening
 
-#### Resources
+##### Resources
 
 - Deploy alpine pods
   - No limits or requests
@@ -57,7 +76,7 @@ namespaces, not the original object.
 - Deploy LimitQuotas and check how they conflict
 - Undo
 
-#### SecurityContext
+##### SecurityContext
 
 - Non-root user
 - What makes a SecurityContext hardened?
