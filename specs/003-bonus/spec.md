@@ -771,12 +771,12 @@ The two items are done in one pass or the README is rewritten twice.
 
 Three files, not a directory per mode:
 
-| Mode            | File               | Contents                                                                                                                                                                                                |
-| --------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Tutorial**    | `docs/tutorial.md` | One path that works: kind up, deploy, isolate two namespaces, harden a workload, approve it, undo it, delete the undo. No choices, no alternatives, no "if you prefer". Every command is a `make` target |
-| **How-to**      | `docs/how-to.md`   | One section per goal an operator actually has. Sections, not files — each is a single task, so the document does not mix modes                                                                           |
-| **Reference**   | `docs/reference.md`| The annotations, the phases and per-target outcomes, the flags, the RBAC verbs and the metric names                                                                                                      |
-| **Explanation** | —                  | `specs/`. Linked, never restated                                                                                                                                                                        |
+| Mode            | File                | Contents                                                                                                                                                                                                 |
+| --------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Tutorial**    | `docs/tutorial.md`  | One path that works: kind up, deploy, isolate two namespaces, harden a workload, approve it, undo it, delete the undo. No choices, no alternatives, no "if you prefer". Every command is a `make` target |
+| **How-to**      | `docs/how-to.md`    | One section per goal an operator actually has. Sections, not files — each is a single task, so the document does not mix modes                                                                           |
+| **Reference**   | `docs/reference.md` | The annotations, the phases and per-target outcomes, the flags, the RBAC verbs and the metric names                                                                                                      |
+| **Explanation** | —                   | `specs/`. Linked, never restated                                                                                                                                                                         |
 
 The how-to sections are the answers that exist today only inside business-rule prose, where an
 operator halfway through an incident will not find them: exempt a workload from hardening;
