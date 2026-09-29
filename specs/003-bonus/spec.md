@@ -69,6 +69,10 @@ inside `## Setup`, and lines 269–403 duplicate the whole structure (Decisions,
 What I'd do, Time spent at 297/334/363/391 mirroring 98/166/200/263). Merge per topic, with
 both features in each section and a single Time spent table. One pass, one decision.
 
+Operator-facing text counts as docs here: `deploy/crd-hardening.yaml` describes the kind with
+"There is no undo.", which `kubectl explain` prints and which this feature makes false. It goes
+in the same pass.
+
 **Architecture.** The line counts point at one function: `HardeningReconciler.discover`,
 `targets.go:145–310`. Everything else in the non-test code is proportionate. The mass is in the
 tests — `hardening_test.go` is 1407 lines against a 348-line source — which is worth one pass
@@ -126,11 +130,11 @@ block a human added after the apply. So the record is a leaf, and the deletion i
 same leaf.
 
 One field breaks it. `seccompProfile.type` is a required union discriminator, so
-`seccompProfile: {}` fails API validation — and 002's BR-02 writes `seccompProfile` **always**,
-so it is on every hardened target. Since a target yields exactly one strategic merge patch
-(`plan.Patch`), that one field would take the whole target's undo down with it, requests
-included. The dry-run refuses it, so it fails loudly rather than corrupting anything; it also
-fails every time.
+`seccompProfile: {}` fails API validation — and 002's BR-02 writes `seccompProfile` wherever the
+pod-level value is absent and at least one container does not declare its own, which is nearly
+every hardened target. Since a target yields exactly one strategic merge patch (`plan.Patch`),
+that one field would take the whole target's undo down with it, requests included. The dry-run
+refuses it, so it fails loudly rather than corrupting anything; it also fails every time.
 
 | Record                                   | Deletion path                       | Why                                                                     |
 | ---------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------- |
@@ -210,11 +214,16 @@ Two deltas:
   that intent rather than contradicting it. Not a contradiction with BR-U09, which _writes_
   `skip` after reverting: the annotation excludes a workload from **hardening**, and an undo
   reads `filled` to decide what to do.
-- **A ReplicaSet may carry the annotation.** The Deployment controller copies a Deployment's own
-  annotations onto the ReplicaSets it creates, so old ReplicaSets carry stale `filled` records.
-  BR-04's controlled-object exclusion already keeps them out of the target set, which makes it
-  load-bearing here rather than cosmetic. AC-U08 pins it on a live cluster, because a fake
-  client does not run the Deployment controller.
+- **A ReplicaSet may carry the annotation, and soon three of them.** The Deployment controller
+  copies a Deployment's own annotations onto the ReplicaSets it creates, so old ReplicaSets carry
+  stale `filled` records — and, once BR-U09 writes them, stale `skip` and `skip-by` too. What
+  keeps a ReplicaSet out is not BR-04's controlled-object exclusion but the kind list above:
+  discovery builds targets from Deployments, StatefulSets and DaemonSets, and reads ReplicaSets
+  only to report them. So the rule BR-U11 depends on is stated here rather than assumed —
+  **`skip-by` is read from the three kinds, never from whatever happens to carry it** — because a
+  copied marker names a live object and would otherwise reject an undo on behalf of a ReplicaSet
+  nobody can hold. AC-U08 pins it on a live cluster, because a fake client does not run the
+  Deployment controller.
 
 ### BR-U07 — Preview, then apply exactly what was approved, per target
 
@@ -241,7 +250,7 @@ radius as BR-02's table, reported per target as BR-09 requires.
 
 An undone workload has absent effective values again, so BR-01 sees a genuine gap and 002 would
 fill it. Nothing stops that on its own. FR-05's generation gate happens to prevent it today — an
-`Applied` object issues no API calls at all (AC-14) — but that is a property of the _request's_
+`Applied` object issues no writes at all (AC-14) — but that is a property of the _request's_
 lifecycle, not a rule about the workload, and FR-01's batched approvals move the generation by
 design. The moment anyone edits `approvedPlan`, the reverted target is back in the plan with a
 fresh hash, one blanket copy-paste from being re-patched. A recreated object, or a second one
@@ -278,13 +287,14 @@ the precise harm BR-01 exists to prevent, committed by the feature built to resp
 the rule is BR-U02's discipline applied to one more field — **touch only what you wrote, and
 only if it is unchanged.**
 
-Three cases on write, decided from what is already on the target:
+Four cases on write, decided from what is already on the target:
 
-| Found on the target                  | Written                                     | Why                                                           |
-| ------------------------------------ | ------------------------------------------- | ------------------------------------------------------------- |
-| no `skip`                            | `skip: "true"` and `skip-by: me`            | Nothing to preserve                                           |
-| `skip` with another undo's `skip-by` | nothing — the object was already `Rejected` | One bypass per workload (BR-U11)                              |
-| `skip` with **no** `skip-by`         | neither                                     | A human's exemption. Not ours to mark, and not ours to remove |
+| Found on the target                  | Written                                     | Why                                                                                                                                              |
+| ------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| no `skip`                            | `skip: "true"` and `skip-by: me`            | Nothing to preserve                                                                                                                              |
+| `skip` with **my own** `skip-by`     | nothing                                     | Already held. The steady state, and what makes a resync of an intact object issue no writes (AC-U22)                                              |
+| `skip` with another undo's `skip-by` | nothing — the object was already `Rejected` | One bypass per workload (BR-U11)                                                                                                                 |
+| `skip` with **no** `skip-by`         | neither                                     | A human's exemption — including a marker whose `skip-by` someone stripped, which is indistinguishable from one. Not ours to mark, nor to remove |
 
 The marker therefore has exactly one owner for as long as it exists, which is what BR-U11 buys
 and why that rule is worth its cost.
@@ -301,17 +311,27 @@ incident — the bypass stops hardening touching those workloads the moment the 
 admitted, and the operator then decides at leisure whether to also roll the changes back. The
 hold patch is still dry-run first, like every other write (NFR-U02).
 
-So a selected workload with records yields one patch carrying the revert, the rewritten `filled`
-annotation and the hold; one without records yields a metadata-only hold patch. The per-target
-status row names the holder, so an operator can see which object a `kubectl delete` would
-release.
+So there are three patch shapes, and arming decides between them as much as records do. An
+**armed** object's selected workload with records yields one patch carrying the revert, the
+rewritten `filled` annotation and the hold. A workload with no records yields a metadata-only
+hold patch — and so does every workload of an **unarmed** object, which is the paragraph above
+made concrete. The per-target status row names the holder, so an operator can see which object a
+`kubectl delete` would release.
 
 **The hold is re-asserted on every resync.** Nothing else would keep it: an `Applied` object is
 otherwise inert, so a `skip` someone strips by hand would silently lapse and the next hardening
-would pick the workload up. The comparison reads the informer cache, so an object whose holds
-are intact still issues no API **writes** — which is AC-14's guarantee, narrowed honestly from
-"no API calls" because the read is now real. This is not D-02's drift repair: that rule is about
-fields the tool does not own, and this annotation is the object's own bookkeeping.
+would pick the workload up. This is not D-02's drift repair: that rule is about fields the tool
+does not own, and this annotation is the object's own bookkeeping.
+
+**What that costs is reads, and there is no cache to take them from.** FR-U05 keeps 002's refusal
+of a workload informer, so the comparison is the discovery pass this feature already runs — a
+`List` per kind per namespace against the API server, up to forty-eight of them for an object
+that has finished reverting, on every resync, for as long as it exists. The lists are not extra
+within a pass; what is new is that an `Applied` undo keeps having passes, where an `Applied`
+`WorkloadHardening` stops (FR-U05). That is the price of a bypass that cannot silently lapse, and
+it is paid entirely in reads: an object whose holds are all intact issues no **writes**. AC-14's
+guarantee is restated on that narrower word throughout (AC-U13, AC-U22), which is the honest
+version of it in any case — FR-05 already reads the request object itself on every resync.
 
 **Holds stand while the object is `Rejected`.** The claim belongs to the object, not to its
 phase, and an object refused for a missing namespace has not stopped asserting a bypass it
@@ -334,13 +354,16 @@ controller was down — is treated as unowned and taken by the next undo that se
 workload. Without that, one orphaned annotation would block every future bypass of that workload
 and the only remedy would be editing it by hand.
 
-**This is the one finalizer in the project, and it is not the one 002 refused.** FR-05 rejected
-a finalizer on `WorkloadHardening` because a delete would then hang on work that can fail:
-undoing patches, halting rollouts, refusals from admission. This one removes two metadata keys.
+**This is not the finalizer 002 refused, and it is the cheaper of the two the project will then
+carry.** 001 already has one — `hardening.acme.corp/cleanup`, which deletes NetworkPolicies on
+the way out and retains itself when that fails. FR-05 refused a *second* one on
+`WorkloadHardening` because a delete would then hang on work that can fail: undoing patches,
+halting rollouts, refusals from admission. This one removes two metadata keys.
 It cannot be blocked by Pod Security or a LimitRange, neither of which reads `metadata`
 annotations; it does not touch `spec.template`, so it starts no rollout; and where the workload
 is gone there is nothing to clean and the finalizer clears. The residual cost is the honest one:
-with the controller down, deleting a `WorkloadHardeningUndo` blocks until it is back.
+with the controller down, deleting a `WorkloadHardeningUndo` blocks until it is back — which is
+already true of a `NetworkIsolation`, waiting on strictly more.
 
 **Nothing in 002 changes.** The earlier draft of this rule had the hardening loop read undo
 objects and refuse whole namespaces — cross-object awareness, an amendment to an implemented
@@ -373,7 +396,8 @@ and a selector-scoped bypass is judged by its **scope**.
 
 The test is the annotation, not selector algebra. Two `matchLabels` sets can be compared for
 satisfiability, but the question that matters is whether a claim exists on a workload that
-exists, which is one list against the informer cache the controller already holds — no
+exists — which is the selected set this pass has already listed, read for one annotation, plus a
+single cluster-wide list of `WorkloadHardeningUndo` to tell a live holder from a dead UID. No
 intersection arithmetic, and no answer that depends on a workload that might be created later.
 
 **Two undos can both preview the same workload.** Nothing is claimed until one of them is
@@ -391,6 +415,15 @@ Finer than 001's BR-03, deliberately: 001 refuses per namespace because a Networ
 is namespace-wide, while a bypass names workloads. Two undos over one namespace are fine, and
 splitting a large revert across objects by selector is the normal way to work within FR-U01's
 caps.
+
+**The cost lands on FR-U01's common case, and is not hidden.** An undo with no selector claims
+every workload in its namespaces for its whole lifetime, so the next undo naming any of them is
+`Rejected` — and both remedies this rule offers, narrowing a selector and splitting by selector,
+are unavailable while that object stands. Deleting it is the remedy, and deleting it is also what
+releases the bypass, which is the point rather than a wrinkle: a standing claim over whole
+namespaces is exactly what an operator asked for by omitting the selector. One who means to
+revert in pieces names a selector on the first object too. The rejection names the holder, so the
+choice is visible at the moment it has to be made rather than inferred from annotations.
 
 ## Functional requirements
 
@@ -418,9 +451,18 @@ spec:
 
 `namespaces` holds 1–16 unique DNS labels. There is no policy block: what to remove is on the
 workloads. `approvedPlan` holds up to 128 twelve-character hex hashes and is the only mutable
-field, by the same CEL transition rule as 001 and 002 — `workloadSelector` is immutable with the
-rest, because widening it after approval would change which workloads the approved hashes
-describe and, more to the point, which workloads the object claims.
+field: `workloadSelector` is immutable with `namespaces`, because widening it after approval
+would change which workloads the approved hashes describe and, more to the point, which workloads
+the object claims.
+
+The transition rule is 001's and 002's in shape but not in text, and the difference is not
+cosmetic. 002 compares its three fields with no `has()` guard and the CRD says why: all three are
+required or defaulted, so all three are always present. `workloadSelector` is optional, so the
+same expression raises a CEL runtime error on an object that omits it — and a transition rule
+that errors rejects the update, so an unguarded copy would refuse **every** edit to a
+whole-namespace undo, the `approvedPlan` edit that arms it included. The rule is therefore
+`has(self.workloadSelector) == has(oldSelf.workloadSelector) && (!has(self.workloadSelector) ||
+self.workloadSelector == oldSelf.workloadSelector)`, and AC-U12 covers it.
 
 `workloadSelector` holds 1–8 `matchLabels` entries, as 001's `podSelector` does, and
 `matchExpressions` is likewise not served. It matches the **workload object's own**
@@ -452,10 +494,28 @@ LimitRanges, extended with the `enforce` label. Same shape, same construction po
 cluster reads stay in the controller and the decision stays pure. If the refactor is skipped,
 the argument is `plan.Policy` and nothing else changes.
 
-**Reused as-is:** `Canonical`, `Hash`, `Lines`, `Provenance` and `Patch`, which already renders
-`null` values and sets the annotation in the same document. **New:** `Invert` and the record
-parser. `plan.Build` is _not_ reused — it takes a policy and finds gaps, which is a different
-question from the same package.
+**Reused as-is:** `Canonical`, `Hash`, `Lines` and `Provenance`. A `Change` whose `JSON` is nil
+already marshals to `null` through `Patch`'s path walker, so the deletion body itself costs
+nothing new.
+
+**Changed: `Patch`.** It hardcodes the annotation it writes — `metadata.annotations[filled] =
+Provenance(changes)` — which is right for 002 and wrong in every one of an undo's cases: `filled`
+must carry the records that *survived*, or be removed with `null`, and `skip` and `skip-by` ride
+in the same document (BR-U05, BR-U09). The annotations become a parameter, and 002 passes what
+`Patch` computes for itself today.
+
+**New: `Invert`, and the part it would be a mistake to call a parser.** Reading the annotation is
+the easy half. Comparing a record against the live value (BR-U02) needs a reader that resolves a
+recorded leaf path on the live `PodSpec` and renders what it finds in `Lines`' form — `[ALL]` for
+a capability list, `RuntimeDefault` for a seccomp type, `Quantity.String()` for a request.
+`plan.Build` cannot supply it: it renders only fields it is about to write, and an undo reads
+fields that are already set. It is seven leaf shapes, so a switch is the right size — but a
+renderer that drifts from `Build`'s produces a wrong answer rather than an error, silently
+leaving a field in place as "edited by a human". So both directions read one table of leaf → read
+→ render, and AC-U02 is the test that pins the two together.
+
+`plan.Build` is _not_ reused for the plan itself either — it takes a policy and finds gaps, which
+is a different question from the same package.
 
 ### FR-U03 — Preview
 
@@ -463,9 +523,15 @@ Every changed target's deletion patch is issued with `DryRun: [All]`, under FR-0
 unchanged: cached while unarmed, always re-run on apply, a refusal reported as the target's
 outcome without requeueing a preview.
 
-Warning headers from the dry-run response are captured through the client's warning handler and
-reported as findings on that target (BR-U04). What the dry-run does not cover is BR-U04's first
-two paragraphs, which is why the `enforce` and LimitRange checks are not optional.
+Warning headers from the dry-run response are reported as findings on that target (BR-U04).
+client-go's warning handler is configured per `rest.Config`, not per request, and one clientset
+serves every reconciler, so the capture is a sink the handler appends to and the caller drains
+around each patch. That is correct only because the controller runs a single worker. It is
+written down because the day a second worker looks attractive this is what breaks, and it breaks
+by attributing one workload's warning to another rather than by failing.
+
+What the dry-run does not cover is BR-U04's first two paragraphs, which is why the `enforce` and
+LimitRange checks are not optional.
 
 Status renders, per target: the object reference, the change hash, the paths that would be
 deleted with the values being removed, the records left in place with the reason, the pods
@@ -480,12 +546,22 @@ delete, so convergence needs no bookkeeping — the mirror of BR-01 making an ap
 
 ### FR-U05 — Reconciliation
 
-FR-05 unchanged, on the same binary, queue and worker, with `WorkloadHardeningUndo` as a third
-watched resource. No workload informer, no drift repair. `Applied` is terminal until
-`approvedPlan` moves; `Rejected` is re-evaluated every resync.
+FR-05's machinery is unchanged — the same binary, queue and worker, with `WorkloadHardeningUndo`
+as a third watched resource, no workload informer and no drift repair — but **its terminality is
+not**, and this is the one place the undo diverges from FR-05's lifecycle.
 
-One finalizer, for the release in BR-U10 and nothing else. The single worker
-(`controller.go:41`) means a hardening reconcile and an undo reconcile never interleave, so the
+FR-05 returns from an `Applied` object before it reads anything. An undo cannot, because BR-U09's
+hold has to be re-asserted or it silently lapses. So `Applied` is terminal for the **revert** —
+the deletion plan is not recomputed and no `spec.template` is touched again until `approvedPlan`
+moves — while the hold comparison runs on every pass, at the read cost BR-U09 prices. `Rejected`
+is re-evaluated every resync as in FR-05, and holds already written stand throughout (BR-U09).
+
+The divergence is the direct cost of BR-U09: a bypass that stops being asserted the moment its
+object goes quiet is not a bypass. Everything else about the phase — that it is reached when the
+approved reverts have landed, that it survives targets left `Unapproved` — is FR-06's, unchanged.
+
+One finalizer on this kind, for the release in BR-U10 and nothing else. The single worker
+(`controller.go:42`) means a hardening reconcile and an undo reconcile never interleave, so the
 hold is in place before any pass could act on the reopened gaps — and it would be anyway, since
 the revert and the annotations are one API call.
 
@@ -520,12 +596,15 @@ drops out of the recomputed plan once its annotation is gone.
 - **NFR-U03 — Access.** **No new verbs on any core resource.** NFR-03 already grants
   `deployments`, `statefulsets`, `daemonsets` get/list/patch cluster-wide and `namespaces`,
   `limitranges` get/list — the hold and the release are annotation patches on objects this tool
-  may already patch. The delta is the `workloadhardeningundos` resource, its status, and
-  `update` on it for the finalizer.
+  may already patch, and BR-U04's `enforce` label sits on a namespace it already reads. The delta
+  is the `workloadhardeningundos` resource, its status, `update` on it for the finalizer, and
+  `workloadhardeningundos/finalizers: update`, which 001 already grants for its own finalizer and
+  which `OwnerReferencesPermissionEnforcement` makes load-bearing where it is enabled.
 - **NFR-U04 — Verification.** Every acceptance criterion has an automated test, 90% unit
-  coverage per `AGENTS.md`. AC-U04, AC-U05, AC-U08, AC-U11 and AC-U12 are script-only: a fake
-  client runs neither admission plugin, nor the Deployment controller, nor the CRD's own schema
-  and CEL rules.
+  coverage per `AGENTS.md`. AC-U04, AC-U05, AC-U08, AC-U11 and AC-U12 are script-only, and
+  AC-U03's second half with them: a fake client runs neither admission plugin, nor the Deployment
+  controller, nor the CRD's own schema and CEL rules — and validates no API type at all, so a
+  dry-run it accepts says nothing about whether the API server would accept the same body.
 
 ## Acceptance criteria
 
@@ -533,7 +612,7 @@ drops out of the recomputed plan once its annotation is gone.
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
 | AC-U01 | A workload hardened by 002 and then undone retains no field this tool wrote — modulo the empty parent objects BR-08 accepts — and its `filled` annotation is replaced by `skip` and `skip-by` in the same patch | Unit     |
 | AC-U02 | A record whose live value was edited by a human is left alone and reported; the comparison is on the rendered form, so `capabilities.drop` recorded as `[ALL]` matches a live `["ALL"]`                                                                             | Unit     |
-| AC-U03 | **The seccomp case:** the deletion patch names `securityContext.seccompProfile`, not `.type`; the resulting template has no `seccompProfile` key and is accepted by a dry-run                                                                                       | Unit     |
+| AC-U03 | **The seccomp case:** the deletion patch names `securityContext.seccompProfile`, not `.type`, and the resulting template has no `seccompProfile` key (unit); on kind, a real dry-run accepts that patch — the half no fake client can answer (script)                | Unit + script |
 | AC-U04 | **Pod Security:** in `enforce: restricted` the four always-on fields are skipped and reported while requests are still removed; in `enforce: baseline` all of them are removed                                                                                      | Script   |
 | AC-U05 | **LimitRange:** a `min` with no default blocks removal of that request and reports it; a LimitRange supplying a default has no record to undo in the first place                                                                                                    | Script   |
 | AC-U06 | Partial undo rewrites the annotation to exactly the surviving records, in the same request; a fully undone target has the annotation removed                                                                                                                        | Unit     |
@@ -543,7 +622,7 @@ drops out of the recomputed plan once its annotation is gone.
 | AC-U10 | A workload deleted and recreated after hardening carries no annotation and yields no target                                                                                                                                                                         | Unit     |
 | AC-U11 | On kind: harden a Deployment, approve, apply, undo, approve, apply — the rollout completes twice, the pods stay Ready, and QoS returns to `BestEffort`                                                                                                              | Script   |
 | AC-U12 | The CRD installs and the API server rejects an empty namespace list, a `matchExpressions` selector, and an edit to any field but `approvedPlan` — `workloadSelector` included                                                                                       | Script   |
-| AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no API calls; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it                      | Unit     |
+| AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no **writes** — it reads its own object, as FR-05 always has; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it | Unit     |
 | AC-U14 | **The hold:** the revert patch carries `skip: "true"` and `skip-by: <uid>` in the same request, and a later WorkloadHardening reports that target excluded rather than planning it — with no change to 002                                                          | Unit     |
 | AC-U15 | **The release:** deleting the undo removes both annotations and the finalizer; a `skip` with no `skip-by` keeps both, so a human's hand-set exemption survives an undo's whole lifecycle                                                                            | Unit     |
 | AC-U16 | **No loop:** a hardening and an undo both naming a namespace converge — the reverted target is excluded from the next hardening plan and neither object churns its hashes across resyncs                                                                            | Unit     |
@@ -559,12 +638,17 @@ fails at the dry-run, loudly, on every target — an undo that never works. AC-U
 dry-run cleanly and halts the rollout afterwards, which is 002's AC-05 trap repeated at
 namespace scope.
 
+Which is why AC-U03 is not a unit test alone. The failure it exists to catch is the API server
+refusing `seccompProfile: {}`, and a fake client has no opinion about that: it would accept the
+wrong patch and the criterion would pass green all the way to a cluster. The path assertion is
+worth keeping as a unit test, because it localises the bug; the proof is the script.
+
 ## Error cases
 
 | Case                                                         | Behaviour                                                                                                                                                                                 |
 | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | No workload in the selected set carries the annotation        | `Applied` immediately, with a message saying so; not an error. Nothing was reverted, but the selected set is still held and is released on delete (BR-U09) |
-| A held workload's `skip` is stripped by hand                  | Re-asserted on the next resync (BR-U09). Reads come from the cache, so an object whose holds are intact still issues no writes |
+| A held workload's `skip` is stripped by hand                  | Re-asserted on the next resync (BR-U09), at the read cost that rule prices. An object whose holds are all intact still issues no writes |
 | A record's live value was edited                             | Skipped, reported `EditedSinceHardening`, left in the rewritten annotation                                                                                                                |
 | The namespace enforces `restricted`                          | The four PSS fields skipped and reported; requests still removed; both recorded in the rewritten annotation                                                                               |
 | A LimitRange `min` with no default covers a recorded request | That request skipped, reported `BlockedByLimitRange`                                                                                                                                      |
@@ -580,7 +664,7 @@ namespace scope.
 | A `skip-by` names a UID with no live object                  | Treated as unowned and claimed by the next undo that selects the workload (BR-U10)                                                                                                        |
 | `workloadSelector` matches nothing in a named namespace       | Not an error. An empty selected set holds nothing and reverts nothing; the object is `Applied` |
 | A target is deleted while an undo holding it still exists    | Nothing to release; the finalizer clears on the next pass and does not block the delete                                                                                                   |
-| The controller is down when an undo is deleted               | The delete blocks on the finalizer until the controller returns. The one place in the project where an object waits on this controller, and it waits on removing two annotations (BR-U10) |
+| The controller is down when an undo is deleted               | The delete blocks on the finalizer until the controller returns — as a `NetworkIsolation` delete already does, and for strictly less work: this finalizer removes two annotations (BR-U10) |
 
 ## Out of scope
 
@@ -605,20 +689,41 @@ namespace scope.
 
 ## Metrics endpoint
 
-There is no `prometheus/client_golang` in `go.sum` and NFR-01 forbids new dependencies. A
-one-shot controller has about six counters worth having — reconciles by phase, targets patched,
-targets reverted, dry-run refusals, apply failures, queue depth — and the text exposition format
-for six counters is `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly 40 lines, with
-no `go.mod` change. That is the version to build. It closes 001's G-07 and 002's G-07.
+About six counters are worth having from a controller that runs once per request — reconciles by
+phase, targets patched, targets reverted, dry-run refusals, apply failures, queue depth — and
+publishing them closes 001's G-07 and 002's G-07.
 
-> User note: Ignore NFR-001 for this feature and add the prometheus lib
+**NFR-01 is waived here, deliberately, and the endpoint is built on `prometheus/client_golang`.**
+The argument NFR-01 encodes is real and this is the case where it loses: six counters in the text
+exposition format are `net/http`, `sync/atomic` and a `fmt.Fprintf` loop in roughly forty lines
+with no `go.mod` change, but a hand-rolled exposition is forty lines every reviewer has to read
+before trusting, and escaping and `# TYPE` ordering are exactly the details a hand-rolled one gets
+subtly wrong. The library is what every scraper and dashboard already assumes.
 
-A Grafana stack is a separate decision and a larger one: more manifest than controller, and it
-scrapes numbers a `kubectl get` already shows for a tool that runs once per request. Build it
-only if the deliverable is a screenshot, and then from a `hack/` script installing
-`kube-prometheus-stack` rather than from checked-in dashboards. Not otherwise.
+The cost is named rather than waved through: `go.sum` carries no prometheus today and the repo
+vendors, so this is `go get` plus `go mod vendor`, and the dependency brings a transitive set of
+its own — a visibly larger `vendor/` for six counters. That is the trade being accepted.
 
-> User note: kube-prometheus-stack is heavy and mroe complex than what we need for this exercise. Prefer raw Grafana and Prometheus charts
+The controller Deployment gains a metrics container port and a Service in front of it. Neither
+needs a new RBAC rule: serving metrics reads nothing from the API.
+
+### Grafana
+
+**The raw `prometheus` and `grafana` charts, not `kube-prometheus-stack`.** The stack installs an
+operator, its CRDs, node-exporter, kube-state-metrics and a default alert set in order to scrape
+six counters — more moving parts than the thing being observed, and slower to stand up than the
+cluster the rest of the verification runs on. The two charts on their own are a Prometheus and a
+Grafana, which is the whole requirement.
+
+The consequence to plan for is scraping. Without the prometheus-operator's CRDs there is no
+`ServiceMonitor`, so the controller is scraped through Prometheus' own `scrape_configs`: either a
+`kubernetes_sd_configs` job selecting the pod by namespace and label, or the `prometheus.io/scrape`
+annotations the chart's default config already honours. The annotations are the smaller of the
+two and are the version to write.
+
+Both charts are installed from a `hack/` script alongside the verification scripts, not from
+checked-in dashboards. A dashboard JSON that drifts from the counters is worse than no dashboard,
+and the script is what makes the result reproducible by someone who did not write it.
 
 ## Integration/e2e tests on kind
 
