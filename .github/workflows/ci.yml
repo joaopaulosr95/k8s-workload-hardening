@@ -115,17 +115,41 @@ jobs:
           set -euo pipefail
           KUBECTL="kubectl --context=kind-hardening"
           $KUBECTL -n isolation-system rollout status deployment/k8s-workload-hardening --timeout=120s
+
+          # Retry, and separate "no body" from "missing series". `kubectl run -i`
+          # captures only stdout, so a probe pod that never started -- a slow
+          # image pull is enough -- yields an empty body, and a series check on
+          # an empty string reports the first metric as missing. That is a
+          # different failure wearing the same message, and it is the one that
+          # actually happened. A fresh pod name per attempt because --rm does
+          # not clean up a pod that failed to start.
+          body=""
+          for i in 1 2 3 4 5; do
+            if body=$($KUBECTL -n isolation-system run "metrics-probe-$i" \
+                        --rm -i --restart=Never --image=curlimages/curl:8.11.1 --quiet -- \
+                        -sS --max-time 15 http://k8s-workload-hardening-metrics:8080/metrics 2>/dev/null) \
+               && [ -n "$body" ]; then
+              break
+            fi
+            echo "probe attempt $i returned nothing; retrying"
+            body=""
+            sleep 10
+          done
+          if [ -z "$body" ]; then
+            echo "the metrics probe never returned a body: the endpoint was not reached at all"
+            $KUBECTL -n isolation-system get svc,endpoints,pod -l app=k8s-workload-hardening
+            exit 1
+          fi
+
           # Assert known series, not a 200. A port that is bound but serving an
           # empty body looks identical to a healthy one from the manifest. This
           # runs after `make verify`, so a real reconcile has exercised them --
           # hardening_reconcile_total is a CounterVec and emits no TYPE line
           # until its first observation.
-          body=$($KUBECTL -n isolation-system run metrics-probe \
-            --rm -i --restart=Never --image=curlimages/curl:8.11.1 --quiet -- \
-            -sS --max-time 10 http://k8s-workload-hardening-metrics:8080/metrics)
           for want in hardening_reconcile_total hardening_targets_patched_total \
                       hardening_dryrun_refusals_total hardening_queue_depth; do
-            printf '%s' "$body" | grep -q "^# TYPE $want" || { echo "missing: $want"; exit 1; }
+            printf '%s' "$body" | grep -q "^# TYPE $want" || {
+              echo "missing: $want"; printf '%s\n' "$body" | grep '^hardening_' || true; exit 1; }
           done
           echo "ok: /metrics serves every declared series"
       - name: Controller logs on failure
