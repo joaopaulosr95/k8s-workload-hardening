@@ -17,7 +17,7 @@ relatedResources:
 ## Objective
 
 Four items outside the two core tasks: a refactor, an undo for workload hardening, a metrics
-endpoint, and integration tests on kind.
+endpoint, and integration/e2e tests on kind.
 
 ## Context
 
@@ -37,8 +37,8 @@ took the unqualified names and hardening got the prefixed ones. The result is fo
 
 | Collision                                                              | Where                                      |
 | ---------------------------------------------------------------------- | ------------------------------------------ |
-| `v1alpha1.Spec` / `Status` (isolation, unqualified) vs `HardeningSpec` / `HardeningStatus` | `types.go:58,71` vs `hardening.go:78,121`  |
-| `plan.Finding` vs `v1alpha1.Finding`                                   | `plan.go:68`, `hardening.go:111`           |
+| `v1alpha1.Spec` / `Status` (isolation, unqualified) vs `HardeningSpec` / `HardeningStatus` | `types.go:58,71` vs `hardening.go:78,127`  |
+| `plan.Finding` vs `v1alpha1.Finding`                                   | `plan.go:68`, `hardening.go:117`           |
 | `Reconciler` vs `HardeningReconciler`                                  | `reconcile.go:29`, `targets.go:33`         |
 | **`plan.Policy` vs package `pkg/policy`** — unrelated things sharing a word | `plan.go:83`, `pkg/policy`            |
 
@@ -52,14 +52,26 @@ package that mean different things by the same word.
 No behaviour changes, so the existing tests are the proof. Anything that needs a test edit
 beyond a rename is a finding, not a refactor.
 
+**Build and manifests.** The same asymmetry outside Go. `make verify` runs isolation while
+`make verify-hardening` runs hardening; likewise `samples` / `samples-hardening` and
+`verify-crd` / `verify-crd-hardening`. Rename the 001 side to `verify-isolation` and
+`samples-isolation`, and keep a `verify` that runs both — which is what the CI job in the
+integration-tests section needs anyway.
+
+`deploy` restarts `deployment/network-isolation` in namespace `isolation-system`: one controller
+process serving both CRDs, named after the first one written. Renaming it is the only item in
+this whole refactor that is **not** free — it moves an RBAC subject and every script that names
+it — so it is a decision rather than a rename, and skipping it costs nothing but a misleading
+name.
+
 **Docs.** The README was written for 001 and 002 was appended: `# core task 2` sits at line 54
 inside `## Setup`, and lines 269–403 duplicate the whole structure (Decisions, Limitations,
 What I'd do, Time spent at 297/334/363/391 mirroring 98/166/200/263). Merge per topic, with
 both features in each section and a single Time spent table. One pass, one decision.
 
 **Architecture.** The line counts point at one function: `HardeningReconciler.discover`,
-`targets.go:131–301`. Everything else in the non-test code is proportionate. The mass is in the
-tests — `hardening_test.go` is 1205 lines against a 310-line source — which is worth one pass
+`targets.go:145–310`. Everything else in the non-test code is proportionate. The mass is in the
+tests — `hardening_test.go` is 1407 lines against a 348-line source — which is worth one pass
 for table consolidation and no more.
 
 ## Undo for workload hardening
@@ -385,7 +397,7 @@ scrapes numbers a `kubectl get` already shows for a tool that runs once per requ
 only if the deliverable is a screenshot, and then from a `hack/` script installing
 `kube-prometheus-stack` rather than from checked-in dashboards. Not otherwise.
 
-## Integration tests on kind
+## Integration/e2e tests on kind
 
 Most of this exists. `hack/verify-isolation.sh` already runs the full NetworkIsolation cycle on
 a live cluster — TCP and UDP, over pod IP *and* ClusterIP, before isolation, after enforcement
