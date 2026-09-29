@@ -64,6 +64,20 @@ jobs:
           [ "$fail" -eq 0 ] && echo "ok: every documented identifier exists"
           exit "$fail"
 
+      - name: Documentation names make targets that exist
+        run: |
+          set -euo pipefail
+          fail=0
+          # `make -n` prints the recipe without running it, so this needs no
+          # cluster. A renamed target is otherwise invisible until a reader
+          # types it.
+          for t in $(grep -rhoE '\bmake [a-z][a-z-]*' README.md docs/*.md | cut -d' ' -f2 | sort -u); do
+            make -n "$t" >/dev/null 2>&1 \
+              || { echo "documentation names 'make $t', which does not exist"; fail=1; }
+          done
+          [ "$fail" -eq 0 ] && echo "ok: every documented make target exists"
+          exit "$fail"
+
       - name: CRD schemas and CEL rules (envtest)
         run: |
           set -euo pipefail
