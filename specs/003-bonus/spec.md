@@ -1,9 +1,9 @@
 ---
 name: Bonus
 description: |
-  Undo for workload hardening, a metrics endpoint, integration/e2e tests on kind, and a naming
-  and documentation refactor across 001 and 002. Undo is specified in full; the other three
-  are scoping notes.
+  Undo for workload hardening, a metrics endpoint, integration/e2e tests on kind, a naming and
+  documentation refactor across 001 and 002, and Diátaxis documentation for the whole project.
+  Undo is specified in full; the other four are scoping notes.
 author: João Bastos <joaopaulosr95@gmail.com>
 status: Draft
 relatedResources:
@@ -16,16 +16,16 @@ relatedResources:
 
 ## Objective
 
-Four items outside the two core tasks: a refactor, an undo for workload hardening, a metrics
-endpoint, and integration/e2e tests on kind.
+Five items outside the two core tasks: a refactor, an undo for workload hardening, a metrics
+endpoint, integration/e2e tests on kind, and documentation for the whole project.
 
 ## Context
 
-Only one of the four is a feature. **Undo** writes to workloads other teams own, has a failure
+Only one of the five is a feature. **Undo** writes to workloads other teams own, has a failure
 mode that halts rollouts, and depends on an admission behaviour no dry-run reports — so it
-carries business rules, acceptance criteria and error cases of its own, below. The other three
-change how existing work is named, packaged or run; they are scoped in a paragraph each and
-deliberately not given the apparatus of a spec they do not need.
+carries business rules, acceptance criteria and error cases of its own, below. The other four
+change how existing work is named, packaged, run or explained; they are scoped in a paragraph
+each and deliberately not given the apparatus of a spec they do not need.
 
 002's D-03 and G-01 point here for the undo, and BR-08 exists to make it possible. This
 document is what those references resolve to.
@@ -289,11 +289,11 @@ only if it is unchanged.**
 
 Four cases on write, decided from what is already on the target:
 
-| Found on the target                  | Written                                     | Why                                                                                                                                              |
-| ------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| no `skip`                            | `skip: "true"` and `skip-by: me`            | Nothing to preserve                                                                                                                              |
-| `skip` with **my own** `skip-by`     | nothing                                     | Already held. The steady state, and what makes a resync of an intact object issue no writes (AC-U22)                                              |
-| `skip` with another undo's `skip-by` | nothing — the object was already `Rejected` | One bypass per workload (BR-U11)                                                                                                                 |
+| Found on the target                  | Written                                     | Why                                                                                                                                             |
+| ------------------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| no `skip`                            | `skip: "true"` and `skip-by: me`            | Nothing to preserve                                                                                                                             |
+| `skip` with **my own** `skip-by`     | nothing                                     | Already held. The steady state, and what makes a resync of an intact object issue no writes (AC-U22)                                            |
+| `skip` with another undo's `skip-by` | nothing — the object was already `Rejected` | One bypass per workload (BR-U11)                                                                                                                |
 | `skip` with **no** `skip-by`         | neither                                     | A human's exemption — including a marker whose `skip-by` someone stripped, which is indistinguishable from one. Not ours to mark, nor to remove |
 
 The marker therefore has exactly one owner for as long as it exists, which is what BR-U11 buys
@@ -356,7 +356,7 @@ and the only remedy would be editing it by hand.
 
 **This is not the finalizer 002 refused, and it is the cheaper of the two the project will then
 carry.** 001 already has one — `hardening.acme.corp/cleanup`, which deletes NetworkPolicies on
-the way out and retains itself when that fails. FR-05 refused a *second* one on
+the way out and retains itself when that fails. FR-05 refused a _second_ one on
 `WorkloadHardening` because a delete would then hang on work that can fail: undoing patches,
 halting rollouts, refusals from admission. This one removes two metadata keys.
 It cannot be blocked by Pod Security or a LimitRange, neither of which reads `metadata`
@@ -500,7 +500,7 @@ nothing new.
 
 **Changed: `Patch`.** It hardcodes the annotation it writes — `metadata.annotations[filled] =
 Provenance(changes)` — which is right for 002 and wrong in every one of an undo's cases: `filled`
-must carry the records that *survived*, or be removed with `null`, and `skip` and `skip-by` ride
+must carry the records that _survived_, or be removed with `null`, and `skip` and `skip-by` ride
 in the same document (BR-U05, BR-U09). The annotations become a parameter, and 002 passes what
 `Patch` computes for itself today.
 
@@ -608,30 +608,30 @@ drops out of the recomputed plan once its annotation is gone.
 
 ## Acceptance criteria
 
-| ID     | Scenario                                                                                                                                                                                                                                                            | Evidence |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| AC-U01 | A workload hardened by 002 and then undone retains no field this tool wrote — modulo the empty parent objects BR-08 accepts — and its `filled` annotation is replaced by `skip` and `skip-by` in the same patch | Unit     |
-| AC-U02 | A record whose live value was edited by a human is left alone and reported; the comparison is on the rendered form, so `capabilities.drop` recorded as `[ALL]` matches a live `["ALL"]`                                                                             | Unit     |
-| AC-U03 | **The seccomp case:** the deletion patch names `securityContext.seccompProfile`, not `.type`, and the resulting template has no `seccompProfile` key (unit); on kind, a real dry-run accepts that patch — the half no fake client can answer (script)                | Unit + script |
-| AC-U04 | **Pod Security:** in `enforce: restricted` the four always-on fields are skipped and reported while requests are still removed; in `enforce: baseline` all of them are removed                                                                                      | Script   |
-| AC-U05 | **LimitRange:** a `min` with no default blocks removal of that request and reports it; a LimitRange supplying a default has no record to undo in the first place                                                                                                    | Script   |
-| AC-U06 | Partial undo rewrites the annotation to exactly the surviving records, in the same request; a fully undone target has the annotation removed                                                                                                                        | Unit     |
-| AC-U07 | A `paused`, `OnDelete` or `partition > 0` target is refused with its remedy named; a protected namespace rejects the object; a `skip`-annotated target **is** undone                                                                                                | Unit     |
-| AC-U08 | A Deployment's ReplicaSet carries the copied `filled` annotation and is never targeted                                                                                                                                                                              | Script   |
-| AC-U09 | Preview writes nothing, publishes a hash per target, and a target whose recorded field a human edits between preview and apply is `Stale`                                                                                                                           | Unit     |
-| AC-U10 | A workload deleted and recreated after hardening carries no annotation and yields no target                                                                                                                                                                         | Unit     |
-| AC-U11 | On kind: harden a Deployment, approve, apply, undo, approve, apply — the rollout completes twice, the pods stay Ready, and QoS returns to `BestEffort`                                                                                                              | Script   |
-| AC-U12 | The CRD installs and the API server rejects an empty namespace list, a `matchExpressions` selector, and an edit to any field but `approvedPlan` — `workloadSelector` included                                                                                       | Script   |
-| AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no **writes** — it reads its own object, as FR-05 always has; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it | Unit     |
-| AC-U14 | **The hold:** the revert patch carries `skip: "true"` and `skip-by: <uid>` in the same request, and a later WorkloadHardening reports that target excluded rather than planning it — with no change to 002                                                          | Unit     |
-| AC-U15 | **The release:** deleting the undo removes both annotations and the finalizer; a `skip` with no `skip-by` keeps both, so a human's hand-set exemption survives an undo's whole lifecycle                                                                            | Unit     |
-| AC-U16 | **No loop:** a hardening and an undo both naming a namespace converge — the reverted target is excluded from the next hardening plan and neither object churns its hashes across resyncs                                                                            | Unit     |
-| AC-U17 | A partially reverted target, where BR-U04 gated the securityContext half, is still held | Unit     |
-| AC-U18 | **Exclusivity:** an undo whose selected set includes a workload already carrying another live object's `skip-by` is `Rejected`, naming both; it reaches `Previewed` on the resync after that object is deleted; a `skip-by` naming no live object does not block it | Unit     |
-| AC-U19 | **Selector:** `workloadSelector` matches the workload's own labels and not the pod template's; two undos over one namespace with disjoint selectors both reach `Applied`; an absent selector covers every workload in the namespace                                 | Unit     |
-| AC-U20 | A workload carrying a human's bare `skip` is reverted but never marked, and the release leaves it alone | Unit     |
-| AC-U21 | **The bypass is wider than the revert:** a selected workload with no `filled` record is still held, by a metadata-only patch that changes no pod-template hash and starts no rollout; an **unarmed** undo holds its whole selected set while reverting nothing | Unit     |
-| AC-U22 | A `skip` stripped by hand from a held workload is re-asserted on the next resync, and an object whose holds are all intact issues no writes on resync | Unit     |
+| ID     | Scenario                                                                                                                                                                                                                                                                                       | Evidence      |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| AC-U01 | A workload hardened by 002 and then undone retains no field this tool wrote — modulo the empty parent objects BR-08 accepts — and its `filled` annotation is replaced by `skip` and `skip-by` in the same patch                                                                                | Unit          |
+| AC-U02 | A record whose live value was edited by a human is left alone and reported; the comparison is on the rendered form, so `capabilities.drop` recorded as `[ALL]` matches a live `["ALL"]`                                                                                                        | Unit          |
+| AC-U03 | **The seccomp case:** the deletion patch names `securityContext.seccompProfile`, not `.type`, and the resulting template has no `seccompProfile` key (unit); on kind, a real dry-run accepts that patch — the half no fake client can answer (script)                                          | Unit + script |
+| AC-U04 | **Pod Security:** in `enforce: restricted` the four always-on fields are skipped and reported while requests are still removed; in `enforce: baseline` all of them are removed                                                                                                                 | Script        |
+| AC-U05 | **LimitRange:** a `min` with no default blocks removal of that request and reports it; a LimitRange supplying a default has no record to undo in the first place                                                                                                                               | Script        |
+| AC-U06 | Partial undo rewrites the annotation to exactly the surviving records, in the same request; a fully undone target has the annotation removed                                                                                                                                                   | Unit          |
+| AC-U07 | A `paused`, `OnDelete` or `partition > 0` target is refused with its remedy named; a protected namespace rejects the object; a `skip`-annotated target **is** undone                                                                                                                           | Unit          |
+| AC-U08 | A Deployment's ReplicaSet carries the copied `filled` annotation and is never targeted                                                                                                                                                                                                         | Script        |
+| AC-U09 | Preview writes nothing, publishes a hash per target, and a target whose recorded field a human edits between preview and apply is `Stale`                                                                                                                                                      | Unit          |
+| AC-U10 | A workload deleted and recreated after hardening carries no annotation and yields no target                                                                                                                                                                                                    | Unit          |
+| AC-U11 | On kind: harden a Deployment, approve, apply, undo, approve, apply — the rollout completes twice, the pods stay Ready, and QoS returns to `BestEffort`                                                                                                                                         | Script        |
+| AC-U12 | The CRD installs and the API server rejects an empty namespace list, a `matchExpressions` selector, and an edit to any field but `approvedPlan` — `workloadSelector` included                                                                                                                  | Script        |
+| AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no **writes** — it reads its own object, as FR-05 always has; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it | Unit          |
+| AC-U14 | **The hold:** the revert patch carries `skip: "true"` and `skip-by: <uid>` in the same request, and a later WorkloadHardening reports that target excluded rather than planning it — with no change to 002                                                                                     | Unit          |
+| AC-U15 | **The release:** deleting the undo removes both annotations and the finalizer; a `skip` with no `skip-by` keeps both, so a human's hand-set exemption survives an undo's whole lifecycle                                                                                                       | Unit          |
+| AC-U16 | **No loop:** a hardening and an undo both naming a namespace converge — the reverted target is excluded from the next hardening plan and neither object churns its hashes across resyncs                                                                                                       | Unit          |
+| AC-U17 | A partially reverted target, where BR-U04 gated the securityContext half, is still held                                                                                                                                                                                                        | Unit          |
+| AC-U18 | **Exclusivity:** an undo whose selected set includes a workload already carrying another live object's `skip-by` is `Rejected`, naming both; it reaches `Previewed` on the resync after that object is deleted; a `skip-by` naming no live object does not block it                            | Unit          |
+| AC-U19 | **Selector:** `workloadSelector` matches the workload's own labels and not the pod template's; two undos over one namespace with disjoint selectors both reach `Applied`; an absent selector covers every workload in the namespace                                                            | Unit          |
+| AC-U20 | A workload carrying a human's bare `skip` is reverted but never marked, and the release leaves it alone                                                                                                                                                                                        | Unit          |
+| AC-U21 | **The bypass is wider than the revert:** a selected workload with no `filled` record is still held, by a metadata-only patch that changes no pod-template hash and starts no rollout; an **unarmed** undo holds its whole selected set while reverting nothing                                 | Unit          |
+| AC-U22 | A `skip` stripped by hand from a held workload is re-asserted on the next resync, and an object whose holds are all intact issues no writes on resync                                                                                                                                          | Unit          |
 
 **AC-U03 and AC-U04 are the two most easily got wrong**, and they fail in opposite ways. AC-U03
 fails at the dry-run, loudly, on every target — an undo that never works. AC-U04 passes the
@@ -645,25 +645,25 @@ worth keeping as a unit test, because it localises the bug; the proof is the scr
 
 ## Error cases
 
-| Case                                                         | Behaviour                                                                                                                                                                                 |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| No workload in the selected set carries the annotation        | `Applied` immediately, with a message saying so; not an error. Nothing was reverted, but the selected set is still held and is released on delete (BR-U09) |
-| A held workload's `skip` is stripped by hand                  | Re-asserted on the next resync (BR-U09), at the read cost that rule prices. An object whose holds are all intact still issues no writes |
-| A record's live value was edited                             | Skipped, reported `EditedSinceHardening`, left in the rewritten annotation                                                                                                                |
-| The namespace enforces `restricted`                          | The four PSS fields skipped and reported; requests still removed; both recorded in the rewritten annotation                                                                               |
-| A LimitRange `min` with no default covers a recorded request | That request skipped, reported `BlockedByLimitRange`                                                                                                                                      |
-| The annotation is malformed or unparseable                   | That target is a finding naming the object; other targets are unaffected. Never guessed at                                                                                                |
-| A recorded path is already absent from the template          | Nothing to delete; the record is dropped from the rewritten annotation, reported `NoRecord`                                                                                               |
-| The dry-run refuses the deletion patch                       | That target's outcome records the API server's message; other targets unaffected                                                                                                          |
-| A dry-run warning names a Pod Security violation             | Reported as a finding on that target alongside whatever the `enforce` check decided                                                                                                       |
-| The undo's own rollout halts                                 | Not detected, as in 002's G-02. `Applied` means the API server accepted the patch                                                                                                         |
-| The workload was patched by two `WorkloadHardening` objects  | Only the second object's records exist to undo. G-U01                                                                                                                                     |
-| A hardening object's `approvedPlan` is edited after an undo  | The reverted target is excluded by BR-04's skip annotation, so it is absent from the recomputed plan and reported as excluded (BR-U09)                                                    |
-| The `skip` annotation was set by a human before the undo ran | `skip-by` is absent, so the release leaves both the annotation and the exemption alone (BR-U10). The undo still reverts the fields it recorded                                            |
-| A selected workload is already claimed by another live undo  | `Rejected`, naming the workload and the holding object (BR-U11). Non-terminal, so narrowing the selector or deleting the other rule clears it                                             |
-| A `skip-by` names a UID with no live object                  | Treated as unowned and claimed by the next undo that selects the workload (BR-U10)                                                                                                        |
-| `workloadSelector` matches nothing in a named namespace       | Not an error. An empty selected set holds nothing and reverts nothing; the object is `Applied` |
-| A target is deleted while an undo holding it still exists    | Nothing to release; the finalizer clears on the next pass and does not block the delete                                                                                                   |
+| Case                                                         | Behaviour                                                                                                                                                                                  |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| No workload in the selected set carries the annotation       | `Applied` immediately, with a message saying so; not an error. Nothing was reverted, but the selected set is still held and is released on delete (BR-U09)                                 |
+| A held workload's `skip` is stripped by hand                 | Re-asserted on the next resync (BR-U09), at the read cost that rule prices. An object whose holds are all intact still issues no writes                                                    |
+| A record's live value was edited                             | Skipped, reported `EditedSinceHardening`, left in the rewritten annotation                                                                                                                 |
+| The namespace enforces `restricted`                          | The four PSS fields skipped and reported; requests still removed; both recorded in the rewritten annotation                                                                                |
+| A LimitRange `min` with no default covers a recorded request | That request skipped, reported `BlockedByLimitRange`                                                                                                                                       |
+| The annotation is malformed or unparseable                   | That target is a finding naming the object; other targets are unaffected. Never guessed at                                                                                                 |
+| A recorded path is already absent from the template          | Nothing to delete; the record is dropped from the rewritten annotation, reported `NoRecord`                                                                                                |
+| The dry-run refuses the deletion patch                       | That target's outcome records the API server's message; other targets unaffected                                                                                                           |
+| A dry-run warning names a Pod Security violation             | Reported as a finding on that target alongside whatever the `enforce` check decided                                                                                                        |
+| The undo's own rollout halts                                 | Not detected, as in 002's G-02. `Applied` means the API server accepted the patch                                                                                                          |
+| The workload was patched by two `WorkloadHardening` objects  | Only the second object's records exist to undo. G-U01                                                                                                                                      |
+| A hardening object's `approvedPlan` is edited after an undo  | The reverted target is excluded by BR-04's skip annotation, so it is absent from the recomputed plan and reported as excluded (BR-U09)                                                     |
+| The `skip` annotation was set by a human before the undo ran | `skip-by` is absent, so the release leaves both the annotation and the exemption alone (BR-U10). The undo still reverts the fields it recorded                                             |
+| A selected workload is already claimed by another live undo  | `Rejected`, naming the workload and the holding object (BR-U11). Non-terminal, so narrowing the selector or deleting the other rule clears it                                              |
+| A `skip-by` names a UID with no live object                  | Treated as unowned and claimed by the next undo that selects the workload (BR-U10)                                                                                                         |
+| `workloadSelector` matches nothing in a named namespace      | Not an error. An empty selected set holds nothing and reverts nothing; the object is `Applied`                                                                                             |
+| A target is deleted while an undo holding it still exists    | Nothing to release; the finalizer clears on the next pass and does not block the delete                                                                                                    |
 | The controller is down when an undo is deleted               | The delete blocks on the finalizer until the controller returns — as a `NetworkIsolation` delete already does, and for strictly less work: this finalizer removes two annotations (BR-U10) |
 
 ## Out of scope
@@ -746,3 +746,59 @@ The actual gap is 002's G-06, and it is narrower than "write integration tests":
    the scripts cover only as far as `kubectl apply` reports.
 
 Rewriting the existing scripts from a fresh test plan would rebuild working code.
+
+## Documentation
+
+Diátaxis splits documentation by what the reader is doing: **tutorial** (learning by doing),
+**how-to** (achieving a goal), **reference** (looking something up), **explanation**
+(understanding why). Its central claim is that mixing two of them in one document serves
+neither, and this project is a clean demonstration — it has one mode, has it unusually well, and
+has nothing of the other three.
+
+**Explanation already exists, and is the best-written thing in the repository.** It is
+`specs/`. Why leaf paths rather than the shallowest path created, why no finalizer on
+`WorkloadHardening`, why a hash per target rather than per plan, why requests and never limits —
+all argued, with the alternative named and refused. Nothing here rewrites any of it. A second
+copy of that reasoning would drift from the one that is load-bearing, and the specs are where an
+implementer already looks. The documentation links to them and stops.
+
+**The README is currently trying to be all four at once**, which is the mechanism behind the
+duplication the Refactor section describes: setup, decisions, limitations and a time log,
+appended once per core task, because there was no other shape available to put them in. Merging
+per topic fixes the symptom. This fixes the cause, and changes what that merge should produce: a
+**router** — what this is, one path in, and four links — rather than a longer single document.
+The two items are done in one pass or the README is rewritten twice.
+
+Three files, not a directory per mode:
+
+| Mode            | File               | Contents                                                                                                                                                                                                |
+| --------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Tutorial**    | `docs/tutorial.md` | One path that works: kind up, deploy, isolate two namespaces, harden a workload, approve it, undo it, delete the undo. No choices, no alternatives, no "if you prefer". Every command is a `make` target |
+| **How-to**      | `docs/how-to.md`   | One section per goal an operator actually has. Sections, not files — each is a single task, so the document does not mix modes                                                                           |
+| **Reference**   | `docs/reference.md`| The annotations, the phases and per-target outcomes, the flags, the RBAC verbs and the metric names                                                                                                      |
+| **Explanation** | —                  | `specs/`. Linked, never restated                                                                                                                                                                        |
+
+The how-to sections are the answers that exist today only inside business-rule prose, where an
+operator halfway through an incident will not find them: exempt a workload from hardening;
+approve a subset of a plan; revert a run that broke something; hand a bypass back; widen the
+blast radius deliberately; read a `Stale` row. Each is three to six commands and the one sentence
+that says when it is the wrong move.
+
+Reference is half-written already, in the CRD field descriptions, which `kubectl explain` prints
+at the terminal where the question is asked. `docs/reference.md` does **not** duplicate them —
+it says `kubectl explain` and covers what no CRD schema can hold: the four annotation keys and
+who may write each, the phase and outcome vocabulary shared across three kinds, the controller
+flags, the RBAC the tool needs and what it deliberately never asks for, and the metric names
+once they exist.
+
+**Drift is the only real risk, and it is unequal.** A stale tutorial wastes an afternoon; a
+stale reference is believed. The tutorial is cheap to protect: every command in it is a `make`
+target, so one loop in CI asserting each named target exists turns a rename into a failed build
+rather than a confused reader. Reference gets the same treatment one level down: the
+annotation keys, phase names and outcome names are Go constants, so CI greps each string in
+`docs/reference.md` and fails if it is not also in `pkg/apis/v1alpha1`. That catches the class of
+error that matters — a documented key that no longer exists — and costs one loop in a script.
+
+Out of scope, and stated rather than implied: no documentation site, no generator, no versioned
+docs, and no man pages. Four Markdown files in a repository this size, read on the forge that
+hosts them, is the whole requirement.
