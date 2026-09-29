@@ -55,7 +55,7 @@ type Group struct {
 // pair needs no policy compiler and several pairs are separate objects (D-01).
 // The two are symmetric — the block is mutual, and their order carries no
 // meaning beyond indexing the generated policies.
-type Spec struct {
+type IsolationSpec struct {
 	Peers []Group `json:"peers"`
 }
 
@@ -68,7 +68,7 @@ type PeerStatus struct {
 
 // Status reports what the controller observed. Peers is index-aligned with
 // Spec.Peers.
-type Status struct {
+type IsolationStatus struct {
 	Phase             Phase        `json:"phase,omitempty"`
 	Message           string       `json:"message,omitempty"`
 	Peers             []PeerStatus `json:"peers,omitempty"`
@@ -78,8 +78,8 @@ type Status struct {
 type NetworkIsolation struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              Spec   `json:"spec"`
-	Status            Status `json:"status,omitempty"`
+	Spec              IsolationSpec   `json:"spec"`
+	Status            IsolationStatus `json:"status,omitempty"`
 }
 
 // FromUnstructured converts an object read through the dynamic client.

@@ -72,7 +72,7 @@ func TestUnstructuredRoundTrip(t *testing.T) {
 // Zero counts are part of the report, not an absence (FR-05), so they must not
 // be dropped by omitempty on the way out.
 func TestZeroCountsAreSerialised(t *testing.T) {
-	iso := &NetworkIsolation{Status: Status{
+	iso := &NetworkIsolation{Status: IsolationStatus{
 		Phase: PhaseActive,
 		Peers: []PeerStatus{{Policy: "netiso-x-0", Matched: 0}, {Policy: "netiso-x-1", Matched: 0}},
 	}}
@@ -124,11 +124,11 @@ func TestFromUnstructuredRejectsMalformedObject(t *testing.T) {
 func TestIsolationWireFormatIsStable(t *testing.T) {
 	iso := &NetworkIsolation{
 		ObjectMeta: metav1.ObjectMeta{Name: "pair", Namespace: "isolation-system"},
-		Spec: Spec{Peers: []Group{
+		Spec: IsolationSpec{Peers: []Group{
 			{Namespace: "tenant-a", PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "gateway"}}},
 			{Namespace: "tenant-b", PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "dashboard"}}},
 		}},
-		Status: Status{Phase: PhaseActive, Message: "both policies written"},
+		Status: IsolationStatus{Phase: PhaseActive, Message: "both policies written"},
 	}
 
 	u, err := ToUnstructured(iso)

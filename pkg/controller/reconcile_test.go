@@ -374,7 +374,7 @@ func deleting() *v1alpha1.NetworkIsolation {
 	object.DeletionTimestamp = &now
 	object.Finalizers = []string{v1alpha1.Finalizer}
 	names := policy.Names(uid)
-	object.Status = v1alpha1.Status{Phase: v1alpha1.PhaseActive, Peers: []v1alpha1.PeerStatus{
+	object.Status = v1alpha1.IsolationStatus{Phase: v1alpha1.PhaseActive, Peers: []v1alpha1.PeerStatus{
 		{Policy: names[0], Matched: 1}, {Policy: names[1], Matched: 1},
 	}}
 	return object
@@ -492,7 +492,7 @@ func TestCleanupWithoutFinalizerIsANoOp(t *testing.T) {
 	object := iso("tenant-a", map[string]string{"app": "gateway"}, "tenant-b", map[string]string{"app": "dashboard"})
 	now := metav1.Now()
 	object.DeletionTimestamp = &now
-	object.Status = v1alpha1.Status{Phase: v1alpha1.PhaseRejected, Message: `namespace "tenant-b" does not exist`}
+	object.Status = v1alpha1.IsolationStatus{Phase: v1alpha1.PhaseRejected, Message: `namespace "tenant-b" does not exist`}
 
 	r := newReconciler()
 	r.Dyn = dynClient(t, object)

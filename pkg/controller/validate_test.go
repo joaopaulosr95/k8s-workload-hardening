@@ -42,7 +42,7 @@ func netpol(namespace, name string, policyTypes []networkingv1.PolicyType, label
 func iso(aNS string, aLabels map[string]string, bNS string, bLabels map[string]string) *v1alpha1.NetworkIsolation {
 	return &v1alpha1.NetworkIsolation{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw-dash", Namespace: "isolation-system", UID: uid},
-		Spec: v1alpha1.Spec{Peers: []v1alpha1.Group{
+		Spec: v1alpha1.IsolationSpec{Peers: []v1alpha1.Group{
 			{Namespace: aNS, PodSelector: metav1.LabelSelector{MatchLabels: aLabels}},
 			{Namespace: bNS, PodSelector: metav1.LabelSelector{MatchLabels: bLabels}},
 		}},

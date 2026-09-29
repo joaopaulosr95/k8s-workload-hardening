@@ -82,7 +82,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 			phase = v1alpha1.PhaseDegraded
 		}
 		logger.Info(string(phase), "reason", rej.reason)
-		if err := r.setStatus(ctx, iso, v1alpha1.Status{
+		if err := r.setStatus(ctx, iso, v1alpha1.IsolationStatus{
 			Phase:   phase,
 			Message: rej.reason,
 			Peers:   iso.Status.Peers,
@@ -103,7 +103,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 		if slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
 			phase = v1alpha1.PhaseDegraded
 		}
-		if statusErr := r.setStatus(ctx, iso, v1alpha1.Status{
+		if statusErr := r.setStatus(ctx, iso, v1alpha1.IsolationStatus{
 			Phase:   phase,
 			Message: err.Error(),
 			Peers:   iso.Status.Peers,
@@ -119,7 +119,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 	if !slices.Contains(iso.Finalizers, v1alpha1.Finalizer) {
 		if v.contaminated() {
 			logger.Info("Rejected", "reason", v.reasons())
-			return r.setStatus(ctx, iso, v1alpha1.Status{Phase: v1alpha1.PhaseRejected, Message: v.reasons()})
+			return r.setStatus(ctx, iso, v1alpha1.IsolationStatus{Phase: v1alpha1.PhaseRejected, Message: v.reasons()})
 		}
 		// Nothing is written until cleanup is guaranteed a chance to run (FR-03).
 		if err := r.patchFinalizers(ctx, iso, append(slices.Clone(iso.Finalizers), v1alpha1.Finalizer)); err != nil {
@@ -147,7 +147,7 @@ func (r *Reconciler) activate(ctx context.Context, logger klog.Logger, iso *v1al
 		}
 	}
 
-	status := v1alpha1.Status{Phase: v1alpha1.PhaseActive, Peers: peers}
+	status := v1alpha1.IsolationStatus{Phase: v1alpha1.PhaseActive, Peers: peers}
 	if len(failures) > 0 {
 		status.Phase = v1alpha1.PhaseDegraded
 		status.Message = strings.Join(failures, "; ")
@@ -194,7 +194,7 @@ func (r *Reconciler) applyPolicy(ctx context.Context, want *networkingv1.Network
 // so reconciling an unchanged object produces no writes at all (AC-06).
 // lastReconcileTime therefore records when the observation last changed, not
 // when the last pass ran.
-func (r *Reconciler) setStatus(ctx context.Context, iso *v1alpha1.NetworkIsolation, want v1alpha1.Status) error {
+func (r *Reconciler) setStatus(ctx context.Context, iso *v1alpha1.NetworkIsolation, want v1alpha1.IsolationStatus) error {
 	want.LastReconcileTime = iso.Status.LastReconcileTime
 	if equality.Semantic.DeepEqual(iso.Status, want) {
 		return nil
@@ -263,7 +263,7 @@ func (r *Reconciler) cleanup(ctx context.Context, logger klog.Logger, iso *v1alp
 		return nil
 	}
 
-	if err := r.setStatus(ctx, iso, v1alpha1.Status{
+	if err := r.setStatus(ctx, iso, v1alpha1.IsolationStatus{
 		Phase: v1alpha1.PhaseDeleting,
 		Peers: iso.Status.Peers,
 	}); err != nil {
