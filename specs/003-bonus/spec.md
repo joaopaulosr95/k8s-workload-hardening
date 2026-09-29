@@ -266,9 +266,23 @@ the precise harm BR-01 exists to prevent, committed by the feature built to resp
 the rule is BR-U02's discipline applied to one more field — **touch only what you wrote, and
 only if it is unchanged.**
 
+Three cases on write, decided from what is already on the target:
+
+| Found on the target                  | Written                          | Why                                                     |
+| ------------------------------------ | -------------------------------- | -------------------------------------------------------- |
+| no `skip`                            | `skip: "true"` and `skip-by: me` | Nothing to preserve                                      |
+| `skip` with a `skip-by`              | `skip-by: me` — **taken over**   | That `skip` was tool-written; the latest reverter holds it |
+| `skip` with **no** `skip-by`         | neither                          | A human's exemption. Not ours to mark, and not ours to remove |
+
+Take-over is what keeps the hold single-valued without reference counting. The undo that most
+recently reverted something on a target is the one holding it, and every earlier one has, by
+construction, nothing left to hold: BR-U05 removed the records it reverted, so those fields can
+never be reverted twice.
+
 Written whenever **anything** was reverted on that target, including a partial revert where
 BR-U04 gated the securityContext half. A target where nothing was reverted gets no patch and no
-annotation, because there is nothing to hold.
+annotation, because there is nothing to hold. The per-target status row names the holder, so an
+operator can see which object a `kubectl delete` would release.
 
 ### BR-U10 — Deleting the undo releases the target
 
@@ -277,9 +291,16 @@ target whose `skip-by` still matches its own UID, then clears the finalizer. Del
 is therefore the gesture that makes a workload eligible for hardening again — one object, one
 `kubectl delete`, no annotation editing across a namespace.
 
-Left in place: a `skip` with no `skip-by`, or one whose `skip-by` names a different object. The
-first is a human's exemption and was never ours; the second belongs to another undo that is
-still live (G-U04).
+Left in place: a `skip` with no `skip-by`, which is a human's exemption and was never ours, and
+one whose `skip-by` names a different object, which a later undo has taken over.
+
+**Two undos over the same namespace are not refused**, and could not be prevented at creation
+anyway — a CEL rule cannot see other objects, and a validating webhook is a deployment artifact
+002 already declined for a smaller reason (D-01). Nor do they need refusing. Reverts are
+**monotonic**: both objects only remove, both read the same shrinking set of `filled` records,
+and the second finds only what the first could not take. There is no loop to break, which is the
+whole difference from a hardening and an undo facing each other. Splitting a large revert across
+objects is also the normal way to work within FR-U01's 16-namespace and 128-hash caps.
 
 **This is the one finalizer in the project, and it is not the one 002 refused.** FR-05 rejected
 a finalizer on `WorkloadHardening` because a delete would then hang on work that can fail:
@@ -429,7 +450,8 @@ drops out of the recomputed plan once its annotation is gone.
 | AC-U12 | The CRD installs and the API server rejects an empty namespace list and an edit to any field but `approvedPlan`                                                                        | Script   |
 | AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no API calls; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it | Unit     |
 | AC-U14 | **The hold:** the revert patch carries `skip: "true"` and `skip-by: <uid>` in the same request, and a later WorkloadHardening reports that target excluded rather than planning it — with no change to 002 | Unit     |
-| AC-U15 | **The release:** deleting the undo removes both annotations and the finalizer; a target whose `skip` has no `skip-by`, or a `skip-by` naming another object, keeps both — a human's hand-set exemption survives an undo's whole lifecycle | Unit     |
+| AC-U15 | **The release:** deleting the undo removes both annotations and the finalizer; a `skip` with no `skip-by` keeps both, so a human's hand-set exemption survives an undo's whole lifecycle | Unit     |
+| AC-U18 | **Take-over:** a second undo reverting what a first could not takes the marker; deleting the first then releases nothing and deleting the second releases the target; a target carrying a human's bare `skip` is reverted but never marked | Unit     |
 | AC-U16 | **No loop:** a hardening and an undo both naming a namespace converge — the reverted target is excluded from the next hardening plan and neither object churns its hashes across resyncs | Unit     |
 | AC-U17 | A partially reverted target, where BR-U04 gated the securityContext half, is still held; a target where nothing was reverted gets no patch and no annotations | Unit     |
 
@@ -468,6 +490,7 @@ namespace scope.
 | D-U03 | Modelling admission beyond namespace labels and LimitRanges    | Cluster-wide Pod Security defaults and third-party policy engines are unbounded. The dry-run warning (FR-U03) catches what it catches; the rest halts a rollout, which is the pre-existing failure mode. |
 | D-U04 | Forcing a removal past a Pod Security refusal                  | The operator's remedy is to relabel the namespace or edit the workload, both of which are decisions this tool should not make on their behalf.                       |
 | D-U05 | Undoing a hardening this tool did not perform                  | No annotation, no record, no evidence of what was there before.                                                                                                      |
+| D-U06 | Refusing a second undo over a namespace another one covers     | Reverts are monotonic, so two undos converge instead of fighting, and the hold stays single-valued by take-over (BR-U09). Preventing it at creation would need a validating webhook to see other objects, which is more machinery than the case is worth. |
 
 ### Deferred
 
@@ -476,7 +499,6 @@ namespace scope.
 | G-U01 | A workload patched by two objects in sequence    | The second annotation write replaces the first, so object 1's record is lost — 002's G-03. 001 refuses this per namespace (its BR-03); 002 does not. Undo inherits the gap rather than creating it. |
 | G-U02 | Watching the undo's rollout to completion        | Shared with 002's G-02, and sharper here: an undo is usually run *because* a rollout halted.                                                                      |
 | G-U03 | Undoing a subset of fields rather than all       | The unit of approval is a target. Per-field approval would need a hash per field and a bigger `approvedPlan` than 128 entries allows.                             |
-| G-U04 | Two undos holding the same target                | `skip-by` names one object. The second undo finds a marker that is not its own, so it reverts but does not re-mark, and deleting the **first** releases the target while the second is still live. Same class as G-U01 and 002's G-03, and inherited rather than created. |
 
 ## Metrics endpoint
 
