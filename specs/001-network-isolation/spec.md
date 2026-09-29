@@ -192,7 +192,7 @@ explicitly rather than hidden.
 - **NFR-05 — Verification.** Every acceptance criterion has an automated test; each code unit reaches
   90% unit coverage per `AGENTS.md`. Fake-client tests are not evidence of packet enforcement.
 - **NFR-06 — Reproducibility.** CRD, controller and RBAC manifests, sample workloads, and a runnable
-  kind script. Record tested versions and actual development time in the README.
+  kind script. Record tested versions in the README.
 
 ## Acceptance criteria
 

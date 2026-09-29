@@ -551,7 +551,7 @@ resulting pods became Ready — that is the rollout's business and the operator'
   are not evidence that a patched workload still runs, so AC-03's limits→requests rule, AC-06's
   LimitRange rule and AC-05's kubelet behaviour are pinned by the kind script.
 - **NFR-06 — Reproducibility.** CRD, RBAC and controller manifests, sample workloads covering
-  each finding class, Makefile targets, and README decisions with actual development time.
+  each finding class, Makefile targets, and README decisions.
 
 ## Acceptance criteria
 

@@ -74,7 +74,7 @@ Five conditions the spec implies but which no acceptance criterion names. Each h
 | `hack/verify-isolation.sh`      | AC-07, on a live kind cluster.                                                                                 |
 | `hack/verify-crd.sh`            | AC-09, on a live cluster.                                                                                      |
 | `Makefile`                      | `test`, `cover`, `kind-up`, `image`, `deploy`, `verify`, `verify-crd`.                                         |
-| `README.md`                     | Setup, decisions, limitations, versions, time spent.                                                           |
+| `README.md`                     | Setup, decisions, limitations, versions.                                                                       |
 
 ---
 
@@ -3353,7 +3353,7 @@ Keep the output for the README.
 
 - [ ] **Step 4: Write the README**
 
-Replace `README.md`. It must cover, because the assignment and NFR-06 ask for each: setup, build, deploy, run; the decisions taken; the tested versions from Step 3; the limitations from BR-01; and the actual development time.
+Replace `README.md`. It must cover, because the assignment and NFR-06 ask for each: setup, build, deploy, run; the decisions taken; the tested versions from Step 3; and the limitations from BR-01.
 
 ```markdown
 # k8s-workload-hardening
@@ -3432,20 +3432,9 @@ These are limits of NetworkPolicy, not of this implementation:
 - **Direct external ingress** to a selected pod is dropped; traffic arriving
   through an in-cluster proxy or ingress controller still works.
 - **IPv4 kind with the default CNI only.** Other CNIs and IPv6 are untested.
-
-## What I'd do with more time
-
-<the G- rows from specs/001-network-isolation/spec.md, in that order: leader
-election, naming the conflicting policy in the Degraded message, Degraded→Active
-recovery tests, hostNetwork pods appearing between resyncs, richer status
-conditions, kind verification in CI plus envtest, metrics and a dry-run preview>
-
-## Time spent
-
-<actual hours>
 ```
 
-Fill every `<...>` placeholder with real content before committing — leaving one in is a failed deliverable, since NFR-06 requires the recorded versions and time.
+Fill every `<...>` placeholder with real content before committing — leaving one in is a failed deliverable, since NFR-06 requires the recorded versions.
 
 - [ ] **Step 5: Run everything one last time**
 

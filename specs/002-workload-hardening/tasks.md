@@ -6390,7 +6390,7 @@ Keep the output for the README.
 
 - [ ] **Step 14: Extend the README**
 
-`README.md` already covers core task 1. Add a core task 2 section covering, because the assignment and NFR-06 ask for each: what it does, the setup commands, the decisions taken, the limitations, and the actual development time.
+`README.md` already covers core task 1. Add a core task 2 section covering, because the assignment and NFR-06 ask for each: what it does, the setup commands, the decisions taken, and the limitations.
 
 ```markdown
 ## Core task 2 — on-demand workload hardening
@@ -6479,20 +6479,9 @@ never written.
   checkpoint one would work from.
 - **Two requests may name the same namespace**, and the second one's provenance
   annotation replaces the first's.
-
-### What I'd do with more time
-
-<the G- rows from specs/002-workload-hardening/spec.md, in that order: the undo
-path, watching the rollout to completion, per-namespace exclusivity between
-objects, gating the configurations BR-02's table shows are worst, richer status
-conditions, kind verification in CI plus envtest, metrics, leader election>
-
-### Time spent
-
-<actual hours for core task 2>
 ```
 
-Fill every `<...>` placeholder with real content before committing — leaving one in is a failed deliverable, since NFR-06 requires the recorded versions and time. Update the existing "Tested versions" section with the Step 13 output if anything moved.
+Fill every `<...>` placeholder with real content before committing — leaving one in is a failed deliverable, since NFR-06 requires the recorded versions. Update the existing "Tested versions" section with the Step 13 output if anything moved.
 
 - [ ] **Step 15: Run everything one last time**
 
