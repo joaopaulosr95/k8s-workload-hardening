@@ -235,7 +235,7 @@ func namespaces(w *v1alpha1.WorkloadHardening) []string {
 // refused, the object is rejected and no namespace is patched. The operator
 // named two namespaces and should get both or neither. Execution, in contrast,
 // is per target (FR-05, BR-07).
-func (r *HardeningReconciler) validate(ctx context.Context, w *v1alpha1.WorkloadHardening) (map[string]plan.Policy, error) {
+func (r *HardeningReconciler) validate(ctx context.Context, w *v1alpha1.WorkloadHardening) (map[string]plan.Request, error) {
 	if n := len(w.Spec.Namespaces); n == 0 || n > maxNamespaces {
 		return nil, reject("spec.namespaces holds %d entries; between 1 and %d are required", n, maxNamespaces)
 	}
@@ -260,7 +260,7 @@ func (r *HardeningReconciler) validate(ctx context.Context, w *v1alpha1.Workload
 		}
 	}
 
-	policies := map[string]plan.Policy{}
+	policies := map[string]plan.Request{}
 	for _, namespace := range namespaces(w) {
 		if _, err := r.Kube.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{}); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -278,7 +278,7 @@ func (r *HardeningReconciler) validate(ctx context.Context, w *v1alpha1.Workload
 			return nil, reject("namespace %q: %s", namespace, why)
 		}
 
-		policies[namespace] = plan.Policy{
+		policies[namespace] = plan.Request{
 			Requests:               requests,
 			ReadOnlyRootFilesystem: w.Spec.SecurityContext.ReadOnlyRootFilesystem,
 			Coverage:               coverage,

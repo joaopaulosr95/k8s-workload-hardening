@@ -143,16 +143,16 @@ func claim(m map[corev1.ResourceName]string, r corev1.ResourceName, name string)
 // wrong about a request costs scheduling position and shows up in
 // `kubectl describe node` rather than in a pager. A memory limit that is too
 // small kills the container after a rollout that completed green (BR-03, D-07).
-func (p *Plan) buildResources(c container, policy Policy) {
+func (p *Plan) buildResources(c container, req Request) {
 	var absentLimits []string
 
 	// Sorted, so the plan and therefore the change hash do not depend on map
 	// iteration order (BR-07).
-	for _, r := range slices.Sorted(maps.Keys(policy.Requests)) {
+	for _, r := range slices.Sorted(maps.Keys(req.Requests)) {
 		_, hasRequest := c.Spec.Resources.Requests[r]
 		_, hasLimit := c.Spec.Resources.Limits[r]
 
-		if !hasLimit && policy.Coverage.Limit(r) == "" {
+		if !hasLimit && req.Coverage.Limit(r) == "" {
 			absentLimits = append(absentLimits, string(r))
 		}
 
@@ -162,13 +162,13 @@ func (p *Plan) buildResources(c container, policy Policy) {
 			// value that is already there (BR-01, D-04).
 		case hasLimit:
 			p.report(c.Spec.Name, "%s request defaulted from limit; no gap, and filling it would cut the reservation (BR-01)", r)
-		case policy.Coverage.Request(r) != "":
+		case req.Coverage.Request(r) != "":
 			p.report(c.Spec.Name, "%s request covered by LimitRange %q; no gap, and writing it would restart every pod to change nothing (BR-06)",
-				r, policy.Coverage.Request(r))
+				r, req.Coverage.Request(r))
 		default:
 			// A local copy: Quantity.String has a pointer receiver, so a map
 			// value cannot be rendered in place.
-			want := policy.Requests[r]
+			want := req.Requests[r]
 			p.add(c.path("resources.requests."+string(r)), want.String(), want.String())
 		}
 	}

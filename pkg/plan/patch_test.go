@@ -120,8 +120,8 @@ func TestHashIsStableAcrossPasses(t *testing.T) {
 
 	// Two policies built from separately constructed maps, so the map
 	// literals have independent internal layouts.
-	first := Policy{Requests: requests("10m", "32Mi"), ReadOnlyRootFilesystem: true}
-	second := Policy{Requests: requests("10m", "32Mi"), ReadOnlyRootFilesystem: true}
+	first := Request{Requests: requests("10m", "32Mi"), ReadOnlyRootFilesystem: true}
+	second := Request{Requests: requests("10m", "32Mi"), ReadOnlyRootFilesystem: true}
 
 	want := Hash(target, Build(pod(), first).Changes)
 	wantCanonical := Canonical(target, Build(pod(), first).Changes)

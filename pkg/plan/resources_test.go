@@ -117,7 +117,7 @@ func TestAbsentLimitIsAFindingNotAChange(t *testing.T) {
 // and 1 are one approval, not two.
 func TestRequestValueIsCanonical(t *testing.T) {
 	pod := &corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}
-	p := Build(pod, Policy{Requests: requests("1000m", "32Mi")})
+	p := Build(pod, Request{Requests: requests("1000m", "32Mi")})
 
 	if v, _ := valueAt(p, "spec.template.spec.containers[app].resources.requests.cpu"); v != "1" {
 		t.Errorf("cpu = %q, want the canonical %q", v, "1")
@@ -299,7 +299,7 @@ func TestLimitRangeCoverage(t *testing.T) {
 func assertCovered(t *testing.T, cov Coverage, r corev1.ResourceName) {
 	t.Helper()
 	pod := &corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}
-	p := Build(pod, Policy{Requests: requests("10m", "32Mi"), Coverage: cov})
+	p := Build(pod, Request{Requests: requests("10m", "32Mi"), Coverage: cov})
 
 	path := "spec.template.spec.containers[app].resources.requests." + string(r)
 	if _, ok := valueAt(p, path); ok {

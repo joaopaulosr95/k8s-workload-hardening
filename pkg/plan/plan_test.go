@@ -9,10 +9,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// basic is a policy that fills both requests and nothing else, with no
+// basic is a request that fills both requests and nothing else, with no
 // LimitRange in the namespace.
-func basic() Policy {
-	return Policy{Requests: requests("10m", "32Mi")}
+func basic() Request {
+	return Request{Requests: requests("10m", "32Mi")}
 }
 
 // paths returns the change paths, which are already sorted by Build.
@@ -144,9 +144,9 @@ func TestReadOnlyRootFilesystemIsOptIn(t *testing.T) {
 		}
 	}
 
-	policy := basic()
-	policy.ReadOnlyRootFilesystem = true
-	on := Build(pod, policy)
+	req := basic()
+	req.ReadOnlyRootFilesystem = true
+	on := Build(pod, req)
 	for _, want := range []string{
 		"spec.template.spec.containers[app].securityContext.readOnlyRootFilesystem",
 		"spec.template.spec.containers[sidecar].securityContext.readOnlyRootFilesystem",

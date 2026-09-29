@@ -1,4 +1,4 @@
-// Package plan turns one workload template and one policy into the set of
+// Package plan turns one workload template and one request into the set of
 // fields this tool would write into it, plus the findings it observed on the
 // way. It is pure — no clients, no context, no clock — so the hard part of
 // this feature is testable on its own (NFR-01, FR-02).
@@ -78,9 +78,9 @@ type Plan struct {
 	Findings []Finding
 }
 
-// Policy is what the operator asked for, plus what the namespace already
+// Request is what the operator asked for, plus what the namespace already
 // supplies.
-type Policy struct {
+type Request struct {
 	// Requests names the value to write into an absent request. The schema
 	// requires both cpu and memory (FR-01).
 	Requests corev1.ResourceList
@@ -117,10 +117,10 @@ func containers(pod *corev1.PodSpec) []container {
 	return out
 }
 
-// Build returns the changes policy would make to pod and the findings it
+// Build returns the changes req would make to pod and the findings it
 // observed. The same function feeds the dry-run, the real patch and the
 // rendered status, so a preview cannot diverge from what is applied (FR-02).
-func Build(pod *corev1.PodSpec, policy Policy) Plan {
+func Build(pod *corev1.PodSpec, req Request) Plan {
 	var p Plan
 	if pod == nil {
 		return p
@@ -134,7 +134,7 @@ func Build(pod *corev1.PodSpec, policy Policy) Plan {
 	p.buildPod(pod, cs)
 
 	for _, c := range cs {
-		p.buildContainer(pod, c, policy)
+		p.buildContainer(pod, c, req)
 	}
 
 	// Sorted, and sorted here rather than at the call site: the change hash is
@@ -241,7 +241,7 @@ func effectiveRunAsUser(pod *corev1.PodSpec, c *corev1.Container) (int64, bool) 
 }
 
 // buildContainer decides the container-level fields for one container.
-func (p *Plan) buildContainer(pod *corev1.PodSpec, c container, policy Policy) {
+func (p *Plan) buildContainer(pod *corev1.PodSpec, c container, req Request) {
 	if privileged(c.Spec) {
 		// Already reported by rootEvidence, and left entirely alone. Dropping
 		// a privileged container's capabilities would be theatre (BR-02), it
@@ -271,7 +271,7 @@ func (p *Plan) buildContainer(pod *corev1.PodSpec, c container, policy Policy) {
 		p.report(c.Spec.Name, "capabilities.drop is already set and does not drop ALL; reported, not overruled (BR-01)")
 	}
 
-	if policy.ReadOnlyRootFilesystem {
+	if req.ReadOnlyRootFilesystem {
 		switch {
 		case sc == nil || sc.ReadOnlyRootFilesystem == nil:
 			p.add(c.path("securityContext.readOnlyRootFilesystem"), "true", true)
@@ -290,5 +290,5 @@ func (p *Plan) buildContainer(pod *corev1.PodSpec, c container, policy Policy) {
 		p.report(c.Spec.Name, "container declares seccompProfile.type: %s; reported, not overruled (BR-01)", sc.SeccompProfile.Type)
 	}
 
-	p.buildResources(c, policy)
+	p.buildResources(c, req)
 }
