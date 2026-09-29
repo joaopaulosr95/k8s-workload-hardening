@@ -242,9 +242,44 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 		})
 	}
 
-	replicaSets, err := apps.ReplicaSets(namespace).List(ctx, fromCache)
+	reported, err := r.discoverFindings(ctx, namespace)
 	if err != nil {
 		return nil, nil, err
+	}
+	findings = append(findings, reported...)
+
+	// Deterministic order — namespace, kind, name — so a retry resumes
+	// predictably and the log reads in the same order as the preview (FR-04).
+	slices.SortFunc(targets, func(a, b hardeningTarget) int {
+		return strings.Compare(a.Ref.String(), b.Ref.String())
+	})
+	slices.SortFunc(findings, func(a, b v1alpha1.Finding) int {
+		return strings.Compare(a.Kind+"/"+a.Name, b.Kind+"/"+b.Name)
+	})
+	return targets, findings, nil
+}
+
+// discoverFindings enumerates everything in one namespace this tool reports
+// but never patches: ReplicaSets and Jobs whose owner is the target instead,
+// standalone ones that are out of scope, CronJobs, and bare pods. All four
+// lists are served from the API server's watch cache — a slightly stale
+// observation is still a true one, and the next resync corrects it (BR-04).
+//
+// Split out of discover because it shares nothing with the targeting half: it
+// produces findings, never targets, and reaches four resources the patching
+// path never looks at. The caller sorts the combined list, so nothing here
+// depends on the order these four run in.
+func (r *HardeningReconciler) discoverFindings(ctx context.Context, namespace string) ([]v1alpha1.Finding, error) {
+	var findings []v1alpha1.Finding
+	report := func(kind, name, reason string) {
+		findings = append(findings, v1alpha1.Finding{Namespace: namespace, Kind: kind, Name: name, Reason: reason})
+	}
+
+	apps := r.Kube.AppsV1()
+
+	replicaSets, err := apps.ReplicaSets(namespace).List(ctx, fromCache)
+	if err != nil {
+		return nil, err
 	}
 	for i := range replicaSets.Items {
 		rs := &replicaSets.Items[i]
@@ -257,7 +292,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 
 	jobs, err := r.Kube.BatchV1().Jobs(namespace).List(ctx, fromCache)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for i := range jobs.Items {
 		j := &jobs.Items[i]
@@ -277,7 +312,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 	// enumerated whether or not they can be acted on.
 	crons, err := r.Kube.BatchV1().CronJobs(namespace).List(ctx, fromCache)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for i := range crons.Items {
 		report("CronJob", crons.Items[i].Name,
@@ -286,7 +321,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 
 	pods, err := r.Kube.CoreV1().Pods(namespace).List(ctx, fromCache)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for i := range pods.Items {
 		p := &pods.Items[i]
@@ -298,15 +333,7 @@ func (r *HardeningReconciler) discover(ctx context.Context, namespace string) ([
 		report("Pod", p.Name, "securityContext is immutable on an existing pod, and deleting someone's workload to improve it is not a trade this tool makes (BR-04, D-09)")
 	}
 
-	// Deterministic order — namespace, kind, name — so a retry resumes
-	// predictably and the log reads in the same order as the preview (FR-04).
-	slices.SortFunc(targets, func(a, b hardeningTarget) int {
-		return strings.Compare(a.Ref.String(), b.Ref.String())
-	})
-	slices.SortFunc(findings, func(a, b v1alpha1.Finding) int {
-		return strings.Compare(a.Kind+"/"+a.Name, b.Kind+"/"+b.Name)
-	})
-	return targets, findings, nil
+	return findings, nil
 }
 
 // excluded reports why obj must never be read as a target, or "" when it may

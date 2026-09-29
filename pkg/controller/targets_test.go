@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -356,5 +357,42 @@ func TestRolloutDescribesTheTargetNotTheDefaults(t *testing.T) {
 
 	if got := rolloutFor(targets, "DaemonSet", "ds-tuned"); !strings.Contains(got, "maxUnavailable 3") {
 		t.Errorf("ds-tuned rollout = %q, want the configured maxUnavailable 3", got)
+	}
+}
+
+// Findings are sorted by kind then name, and setStatus writes status only on a
+// semantic difference. A split that reorders them would make every resync of
+// every object write status forever, which is the opposite of FR-06.
+func TestDiscoverFindingOrderIsStable(t *testing.T) {
+	r := newHardener(
+		ns("tenant-a"),
+		deployment("tenant-a", "api"),
+		&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "orphan-rs", Namespace: "tenant-a"}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "migrate", Namespace: "tenant-a"}},
+		&batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: "tenant-a"}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bare", Namespace: "tenant-a"}},
+	)
+
+	var first []string
+	for pass := 0; pass < 3; pass++ {
+		_, findings, err := r.discover(context.Background(), "tenant-a")
+		if err != nil {
+			t.Fatalf("discover: %v", err)
+		}
+		var got []string
+		for _, f := range findings {
+			got = append(got, f.Kind+"/"+f.Name)
+		}
+		if pass == 0 {
+			first = got
+			want := []string{"CronJob/nightly", "Job/migrate", "Pod/bare", "ReplicaSet/orphan-rs"}
+			if !slices.Equal(got, want) {
+				t.Fatalf("findings = %v, want %v", got, want)
+			}
+			continue
+		}
+		if !slices.Equal(got, first) {
+			t.Errorf("pass %d reordered findings:\n got %v\nwant %v", pass, got, first)
+		}
 	}
 }
