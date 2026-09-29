@@ -2,3 +2,5 @@
 vendor/
 TODO_*
 coverage.out
+# Control-plane binaries for test/envtest: fetched by `make envtest-assets`.
+bin/

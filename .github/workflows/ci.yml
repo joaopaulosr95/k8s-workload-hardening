@@ -30,6 +30,17 @@ jobs:
       - name: Coverage floor
         run: make cover
 
+      - name: CRD schemas and CEL rules (envtest)
+        run: |
+          set -euo pipefail
+          out=$(make test-envtest GOTESTFLAGS=-v 2>&1) || { printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out"
+          # The suite exits 0 when the control-plane assets are missing, so
+          # `ok` alone does not mean it ran. Assert a named test reported a
+          # result: absent it, the assets never arrived.
+          printf '%s' "$out" | grep -q -- '--- PASS: TestHardeningTransitionRule' || {
+            echo "envtest did not run: the control-plane assets were not fetched"; exit 1; }
+
   kind:
     runs-on: ubuntu-latest
     steps:
