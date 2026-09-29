@@ -88,13 +88,18 @@ Inherits 002's. Two additions:
   this tool wrote, and the value it wrote, in the rendering `plan.Lines` produces.
 - **Deletion path:** the path actually sent as `null`. Usually the record's own leaf; not always
   (BR-U03).
+- **Selected set:** the workloads an undo covers — the three kinds in its named namespaces whose
+  **own** `metadata.labels` match `spec.workloadSelector`, before BR-U06's exclusions. It is the
+  scope of the bypass, not just of the revert: a workload is in it whether or not it carries a
+  record to undo.
 
 ### BR-U01 — The checkpoint is the annotation, not status
 
 The provenance annotation on the patched workload (002's BR-08), never `status.applied[]`.
 Status dies with the custom resource: one-shot semantics and no finalizer mean deleting the
 `WorkloadHardening` destroys any record living there. The annotation outlives it, which is what
-makes an undo a standalone operation — it needs a list of namespaces, not the original object.
+makes an undo a standalone operation — it needs namespaces and a selector, not the original
+object.
 
 Nothing to undo if the workload was replaced: delete and recreate it and the annotation goes
 too, correctly, because the new template was never patched.
@@ -192,8 +197,8 @@ operator inspects to see what this tool did to their workload is a lie.
 
 ### BR-U06 — Selection, exclusion and refusal, with two deltas
 
-002's BR-04 and BR-05 apply unchanged: 1–16 explicit namespaces, protected namespaces reject the
-whole object, the same three kinds, controlled objects skipped, and `spec.paused`, `OnDelete` or
+002's BR-04 and BR-05 apply unchanged within the selected set: 1–16 explicit namespaces,
+protected namespaces reject the whole object, the same three kinds, controlled objects skipped, and `spec.paused`, `OnDelete` or
 `partition > 0` **refused**. An undo patch sits just as inert on a workload that will not roll
 out, and the operator's remedy — unpause, or roll manually — is named in the refusal. (A halted
 rollout is not a `paused` Deployment, so the case is rarer here than it reads.)
@@ -271,13 +276,11 @@ Three cases on write, decided from what is already on the target:
 | Found on the target                  | Written                          | Why                                                     |
 | ------------------------------------ | -------------------------------- | -------------------------------------------------------- |
 | no `skip`                            | `skip: "true"` and `skip-by: me` | Nothing to preserve                                      |
-| `skip` with a `skip-by`              | `skip-by: me` — **taken over**   | That `skip` was tool-written; the latest reverter holds it |
+| `skip` with another undo's `skip-by` | nothing — the object was already `Rejected` | One bypass per workload (BR-U11)             |
 | `skip` with **no** `skip-by`         | neither                          | A human's exemption. Not ours to mark, and not ours to remove |
 
-Take-over is what keeps the hold single-valued without reference counting. The undo that most
-recently reverted something on a target is the one holding it, and every earlier one has, by
-construction, nothing left to hold: BR-U05 removed the records it reverted, so those fields can
-never be reverted twice.
+The marker therefore has exactly one owner for as long as it exists, which is what BR-U11 buys
+and why that rule is worth its cost.
 
 Written whenever **anything** was reverted on that target, including a partial revert where
 BR-U04 gated the securityContext half. A target where nothing was reverted gets no patch and no
@@ -291,16 +294,15 @@ target whose `skip-by` still matches its own UID, then clears the finalizer. Del
 is therefore the gesture that makes a workload eligible for hardening again — one object, one
 `kubectl delete`, no annotation editing across a namespace.
 
-Left in place: a `skip` with no `skip-by`, which is a human's exemption and was never ours, and
-one whose `skip-by` names a different object, which a later undo has taken over.
+Left in place: a `skip` with no `skip-by`, which is a human's exemption and was never ours. A
+marker naming another object cannot be reached, because BR-U11 refused the object before it
+planned anything.
 
-**Two undos over the same namespace are not refused**, and could not be prevented at creation
-anyway — a CEL rule cannot see other objects, and a validating webhook is a deployment artifact
-002 already declined for a smaller reason (D-01). Nor do they need refusing. Reverts are
-**monotonic**: both objects only remove, both read the same shrinking set of `filled` records,
-and the second finds only what the first could not take. There is no loop to break, which is the
-whole difference from a hardening and an undo facing each other. Splitting a large revert across
-objects is also the normal way to work within FR-U01's 16-namespace and 128-hash caps.
+**A marker naming an object that no longer exists is not a claim.** A `skip-by` whose UID
+matches no live `WorkloadHardeningUndo` — a finalizer force-cleared, an object removed while the
+controller was down — is treated as unowned and taken by the next undo that selects the
+workload. Without that, one orphaned annotation would block every future bypass of that workload
+and the only remedy would be editing it by hand.
 
 **This is the one finalizer in the project, and it is not the one 002 refused.** FR-05 rejected
 a finalizer on `WorkloadHardening` because a delete would then hang on work that can fail:
@@ -319,6 +321,40 @@ proceeds on every workload in the namespace the undo did not touch.
 There is no `spec.exempt` flag. A **permanent** exemption is a human writing `skip: "true"`
 themselves, with no `skip-by`, which this feature then never removes. The two intents stay
 distinct because the marker distinguishes them.
+
+### BR-U11 — One bypass rule per workload
+
+A `WorkloadHardeningUndo` is `Rejected` if any workload in its selected set already carries a
+`skip-by` naming a different, live undo object. The message names the workload and the object
+holding it; the remedy is to narrow the selector or delete the other rule.
+
+This is a consequence of BR-U09 and BR-U10 rather than a separate policy. A bypass is a
+**standing** claim, not a one-shot action: it persists for the object's whole lifetime and ends
+when the object is deleted. Two standing claims over one workload cannot both be honoured by a
+single-valued annotation, and any tie-break is wrong in one direction — releasing on the first
+delete strips a bypass the surviving rule still asserts, releasing on the last leaves a workload
+held by an object whose scope no longer covers it.
+
+The reverting half would have been fine unrefereed, and an earlier draft of this document
+declined the rule on exactly that ground: reverts are monotonic, both objects only remove, and
+BR-U05 deletes each record as it is reverted, so the second finds only what the first could not
+take. That reasoning is sound and no longer sufficient. It is an argument about the **action**,
+and a selector-scoped bypass is judged by its **scope**.
+
+The test is the annotation, not selector algebra. Two `matchLabels` sets can be compared for
+satisfiability, but the question that matters is whether a claim exists on a workload that
+exists, which is one list against the informer cache the controller already holds — no
+intersection arithmetic, and no answer that depends on a workload that might be created later.
+
+Refusal, not prevention at creation. A CEL rule cannot see other objects, and a validating
+webhook is a deployment artifact with TLS and a CA bundle that 002 declined for a larger payoff
+(D-01). `Rejected` is non-terminal (FR-05), so an object refused this way starts working by
+itself once the conflicting rule is deleted, which is the behaviour an operator wants anyway.
+
+Finer than 001's BR-03, deliberately: 001 refuses per namespace because a NetworkPolicy's effect
+is namespace-wide, while a bypass names workloads. Two undos over one namespace are fine, and
+splitting a large revert across objects by selector is the normal way to work within FR-U01's
+caps.
 
 ## Functional requirements
 
@@ -339,15 +375,33 @@ metadata:
   namespace: isolation-system
 spec:
   namespaces: [tenant-a, tenant-b]
+  workloadSelector: # optional; absent selects every workload in those namespaces
+    matchLabels: { app: api }
   approvedPlan: [] # empty => preview only; the only mutable field
 ```
 
 `namespaces` holds 1–16 unique DNS labels. There is no policy block: what to remove is on the
 workloads. `approvedPlan` holds up to 128 twelve-character hex hashes and is the only mutable
-field, by the same CEL transition rule as 001 and 002.
+field, by the same CEL transition rule as 001 and 002 — `workloadSelector` is immutable with the
+rest, because widening it after approval would change which workloads the approved hashes
+describe and, more to the point, which workloads the object claims.
 
-The object is kept after it reaches `Applied`, not cleaned up: while it exists its targets stay
-held out of hardening (BR-U09), and deleting it is what releases them (BR-U10).
+`workloadSelector` holds 1–8 `matchLabels` entries, as 001's `podSelector` does, and
+`matchExpressions` is likewise not served. It matches the **workload object's own**
+`metadata.labels` — not the pod template's, which is the same word meaning a different thing one
+level down and the mistake this field is most likely to invite. `kubectl get deploy
+--show-labels` is what an operator reads to predict it.
+
+**Named `workloadSelector`, not `podSelector`.** 001 selects pods, because a NetworkPolicy's
+subject is a pod. This selects the objects being patched. Reusing the name across two kinds that
+select different things is exactly the collision the Refactor section is about.
+
+Absent selects every workload in the named namespaces, which is the whole-namespace revert of a
+bad hardening run and remains the common case. Present, the object is a bypass rule for the
+workloads it names, and BR-U11 keeps it the only one covering them.
+
+The object is kept after it reaches `Applied`, not cleaned up: while it exists its selected set
+stays held out of hardening (BR-U09), and deleting it is what releases them (BR-U10).
 
 ### FR-U02 — The inverse plan
 
@@ -447,11 +501,13 @@ drops out of the recomputed plan once its annotation is gone.
 | AC-U09 | Preview writes nothing, publishes a hash per target, and a target whose recorded field a human edits between preview and apply is `Stale`                                               | Unit     |
 | AC-U10 | A workload deleted and recreated after hardening carries no annotation and yields no target                                                                                             | Unit     |
 | AC-U11 | On kind: harden a Deployment, approve, apply, undo, approve, apply — the rollout completes twice, the pods stay Ready, and QoS returns to `BestEffort`                                  | Script   |
-| AC-U12 | The CRD installs and the API server rejects an empty namespace list and an edit to any field but `approvedPlan`                                                                        | Script   |
+| AC-U12 | The CRD installs and the API server rejects an empty namespace list, a `matchExpressions` selector, and an edit to any field but `approvedPlan` — `workloadSelector` included                | Script   |
 | AC-U13 | **No silent re-harden:** after a full undo, an `Applied` WorkloadHardening whose generation has not moved issues no API calls; editing its `approvedPlan` republishes the undone target with a new hash as `Unapproved`, and does not patch it | Unit     |
 | AC-U14 | **The hold:** the revert patch carries `skip: "true"` and `skip-by: <uid>` in the same request, and a later WorkloadHardening reports that target excluded rather than planning it — with no change to 002 | Unit     |
 | AC-U15 | **The release:** deleting the undo removes both annotations and the finalizer; a `skip` with no `skip-by` keeps both, so a human's hand-set exemption survives an undo's whole lifecycle | Unit     |
-| AC-U18 | **Take-over:** a second undo reverting what a first could not takes the marker; deleting the first then releases nothing and deleting the second releases the target; a target carrying a human's bare `skip` is reverted but never marked | Unit     |
+| AC-U18 | **Exclusivity:** an undo whose selected set includes a workload already carrying another live object's `skip-by` is `Rejected`, naming both; it reaches `Previewed` on the resync after that object is deleted; a `skip-by` naming no live object does not block it | Unit     |
+| AC-U19 | **Selector:** `workloadSelector` matches the workload's own labels and not the pod template's; two undos over one namespace with disjoint selectors both reach `Applied`; an absent selector covers every workload in the namespace | Unit     |
+| AC-U20 | A workload carrying a human's bare `skip` is reverted but never marked, and the release leaves it alone | Unit     |
 | AC-U16 | **No loop:** a hardening and an undo both naming a namespace converge — the reverted target is excluded from the next hardening plan and neither object churns its hashes across resyncs | Unit     |
 | AC-U17 | A partially reverted target, where BR-U04 gated the securityContext half, is still held; a target where nothing was reverted gets no patch and no annotations | Unit     |
 
@@ -476,6 +532,9 @@ namespace scope.
 | The workload was patched by two `WorkloadHardening` objects   | Only the second object's records exist to undo. G-U01                                                           |
 | A hardening object's `approvedPlan` is edited after an undo   | The reverted target is excluded by BR-04's skip annotation, so it is absent from the recomputed plan and reported as excluded (BR-U09) |
 | The `skip` annotation was set by a human before the undo ran  | `skip-by` is absent, so the release leaves both the annotation and the exemption alone (BR-U10). The undo still reverts the fields it recorded |
+| A selected workload is already claimed by another live undo   | `Rejected`, naming the workload and the holding object (BR-U11). Non-terminal, so narrowing the selector or deleting the other rule clears it |
+| A `skip-by` names a UID with no live object                   | Treated as unowned and claimed by the next undo that selects the workload (BR-U10) |
+| `workloadSelector` matches nothing in a named namespace       | Not an error. An empty selected set contributes no targets; an object whose whole plan is empty is `Applied` |
 | A target is deleted while an undo holding it still exists     | Nothing to release; the finalizer clears on the next pass and does not block the delete |
 | The controller is down when an undo is deleted                | The delete blocks on the finalizer until the controller returns. The one place in the project where an object waits on this controller, and it waits on removing two annotations (BR-U10) |
 
@@ -490,7 +549,7 @@ namespace scope.
 | D-U03 | Modelling admission beyond namespace labels and LimitRanges    | Cluster-wide Pod Security defaults and third-party policy engines are unbounded. The dry-run warning (FR-U03) catches what it catches; the rest halts a rollout, which is the pre-existing failure mode. |
 | D-U04 | Forcing a removal past a Pod Security refusal                  | The operator's remedy is to relabel the namespace or edit the workload, both of which are decisions this tool should not make on their behalf.                       |
 | D-U05 | Undoing a hardening this tool did not perform                  | No annotation, no record, no evidence of what was there before.                                                                                                      |
-| D-U06 | Refusing a second undo over a namespace another one covers     | Reverts are monotonic, so two undos converge instead of fighting, and the hold stays single-valued by take-over (BR-U09). Preventing it at creation would need a validating webhook to see other objects, which is more machinery than the case is worth. |
+| D-U06 | `matchExpressions`, and selecting by namespace label           | 001 serves neither, for the same reason: `matchLabels` covers the cases the brief describes and keeps the blast radius readable in the object. BR-U11's check reads annotations rather than comparing selectors, so a richer selector would not have made it harder — it is simply not needed. |
 
 ### Deferred
 
