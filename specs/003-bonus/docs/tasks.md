@@ -279,7 +279,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: `docs/reference.md` from Task 1, linked from each section rather than restated.
 - Produces: `docs/how-to.md`. Task 3's router links to it.
 
-Six goals an operator actually has. Each answer exists today, inside business-rule prose in `specs/`, where somebody halfway through an incident will not find it. Sections rather than one file per goal: each section is a single task, so the document does not mix modes, and six files of twelve lines each is a directory to navigate for no gain.
+Four goals an operator actually has. Each answer exists today, inside business-rule prose in `specs/`, where somebody halfway through an incident will not find it. Sections rather than one file per goal: each section is a single task, so the document does not mix modes, and six files of twelve lines each is a directory to navigate for no gain.
 
 Every section has the same shape and nothing else: one sentence saying when this is the right move, three to six commands, one sentence saying when it is the wrong one. No background, no alternatives, no reasoning — a link to the spec covers all three.
 
